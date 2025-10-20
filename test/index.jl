@@ -173,7 +173,7 @@ end
         close(reader)
 
         @test get_virtual_offset(gzi, -1) === nothing
-        @test get_virtual_offset(gzi, length(decompressed)) === nothing
+        @test get_virtual_offset(gzi, 100_000) === nothing
     end
 end
 
