@@ -53,26 +53,10 @@ An `index::GZIndex` value contains the (public) property `index.blocks`, which i
 GZIndex
 ```
 
-Let's say you want to seek to the decompressed offset 37 in our example BGZF file.
-The approach is this:
+With a `GZIndex`, you can use [`get_virtual_offset`](@ref) to find the [`VirtualOffset`](@ref) that corresponds to a given position in the decompressed stream.
 
-* Find the first block with a decompressed offset `D <= 37`. Since `.blocks` is sorted, you can use binary search for this.
-* Virtualseek to `VirtalOffset(D, 37 - D)`
-
-```jldoctest
-gzi = load_gzi(CursorReader(gzi_data))
-reader = SyncBGZFReader(CursorReader(bgzf_data))
-
-# Use `searchsortedlast` to find the last block with a decompressed offset
-# <= 37, i.e. the block containing the decompressed offset 37.
-target_block = (;compressed_offset=0, decompressed_offset=37)
-idx = searchsortedlast(gzi.blocks, target_block, by=i -> i.decompressed_offset)
-(;compressed_offset, decompressed_offset) = gzi.blocks[idx]
-virtual_seek(reader, VirtualOffset(compressed_offset, 37 - decompressed_offset))
-read(reader) |> String
-
-# output
-"more content herethis is another block"
+```@docs; canonical = false
+get_virtual_offset
 ```
 
 #### Building a `GZIndex`

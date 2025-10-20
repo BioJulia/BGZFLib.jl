@@ -183,7 +183,7 @@ julia> read(reader, String)
 julia> seek(reader, 45); # NB: Not start of BGZF block
 
 julia> read(reader, UInt8)
-ERROR: BGZFError(0, LibDeflate.LibDeflateErrors.gzip_bad_magic_bytes)
+ERROR: BGZFError: Error in block at offset 0: Error in parsing gzip content: gzip_bad_magic_bytes
 
 julia> close(reader)
 ```

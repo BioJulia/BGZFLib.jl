@@ -159,6 +159,22 @@ end
 
         close(reader)
     end
+
+    @testset "Some decompressed offsets" begin
+        gzi = load_gzi(CursorReader(gzi_data))
+        reader = SyncBGZFReader(CursorReader(gz1_data))
+        decompressed = read(reader)
+        for dco in [0, 5, 10, 30, 45, 60]
+            vo = get_virtual_offset(gzi, dco)
+            virtual_seek(reader, vo)
+            v = read(reader)
+            @test v == decompressed[(dco + 1):end]
+        end
+        close(reader)
+
+        @test get_virtual_offset(gzi, -1) === nothing
+        @test get_virtual_offset(gzi, length(decompressed)) === nothing
+    end
 end
 
 @testset "Round trip: index, write, load" begin
