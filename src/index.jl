@@ -1,5 +1,3 @@
-# TODO: Names here are a mess. Underscore or not? gzi, gz, or index?
-
 const IndexBlock = @NamedTuple{compressed_offset::UInt64, decompressed_offset::UInt64}
 
 # must be sorted, else BGZF error. EOFerror. must be little endian
@@ -25,7 +23,7 @@ struct GZIndex
     blocks::Vector{IndexBlock}
 
     function GZIndex(v::Vector{IndexBlock})
-        if !is_sorted(ImmutableMemoryView(v))
+        if !validate_blocks(ImmutableMemoryView(v))
             throw(BGZFError(nothing, BGZFErrors.unsorted_index))
         end
         return new(v)
@@ -91,7 +89,7 @@ function get_buffer_with_length(io::AbstractBufReader, len::Int)::Union{Nothing,
     return buffer
 end
 
-function is_sorted(blocks::ImmutableMemoryView{IndexBlock})
+function validate_blocks(blocks::ImmutableMemoryView{IndexBlock})
     isempty(blocks) && return true
     fst = @inbounds blocks[1]
     (co, dco) = (fst.compressed_offset, fst.decompressed_offset)
@@ -102,6 +100,9 @@ function is_sorted(blocks::ImmutableMemoryView{IndexBlock})
     for i in 2:lastindex(blocks)
         (; compressed_offset, decompressed_offset) = @inbounds blocks[i]
         good &= (co ≤ compressed_offset) & (dco ≤ decompressed_offset)
+        good &= compressed_offset < UInt64(2^48)
+        good &= (compressed_offset - co) ≤ MAX_BLOCK_SIZE
+        good &= (decompressed_offset - dco) ≤ MAX_BLOCK_SIZE
         co = compressed_offset
         dco = decompressed_offset
     end
@@ -208,4 +209,55 @@ function index_bgzf(io::AbstractBufReader)
         @inbounds consume(io, block_size % Int)
     end
     return
+end
+
+"""
+    get_virtual_offset(gzi::GZIndex, offset::Int)::Union{Nothing, VirtualOffset}
+
+Get the `VirtualOffset` that corresponds to the zero-based offset `offset` in the
+decompressed BGZF stream indexed by `gzi`.
+
+Return `nothing` if `offset` is smaller than zero, or points more than 2^16 bytes
+beyond the start of the final block.
+
+Note that, because gzi files (and thus `GZIndex`) do not store the length of the
+final block, the resulting `VirtualOffset` may be invalid.
+Specifically, if the resulting `VirtualOffset` points `bo ≤`2^16` bytes into the final
+block, but the final block is less than `bo` bytes, this function will return
+a `VirtualOffset`, but using that offset to seek in the corresponding BGZF stream will error.
+
+# Examples
+```jldoctest
+julia> gzi = load_gzi(CursorReader(gzi_data));
+
+julia> get_virtual_offset(gzi, 100_000) === nothing
+true
+
+julia> vo = get_virtual_offset(gzi, 45)
+VirtualOffset(223, 8)
+
+julia> reader = virtual_seek(SyncBGZFReader(CursorReader(bgzf_data)), vo);
+
+julia> read(reader) |> String
+"tent herethis is another block"
+
+julia> bad_vo = get_virtual_offset(gzi, 500)
+VirtualOffset(323, 425)
+
+julia> virtual_seek(reader, bad_vo);
+ERROR: BGZFError: Error in block at offset 323: Seek to block offset larger than block size
+[...]
+
+julia> close(reader)
+```
+"""
+function get_virtual_offset(gzi::GZIndex, offset::Int)::Union{Nothing, VirtualOffset}
+    offset < 0 && return nothing
+    target_block = (; compressed_offset = 0, decompressed_offset = offset)
+    idx = searchsortedlast(gzi.blocks, target_block, by = i -> i.decompressed_offset)
+    idx < 1 && return nothing
+    block = gzi.blocks[idx]
+    block_offset = offset - block.decompressed_offset
+    block_offset > 2^16 && return nothing
+    return VirtualOffset(block.compressed_offset, block_offset)
 end

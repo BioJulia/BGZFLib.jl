@@ -1,7 +1,5 @@
 module BGZFLib
 
-# TODO: Tests.
-
 using MemoryViews: MemoryView, ImmutableMemoryView, MutableMemoryView
 using LibDeflate: Compressor,
     Decompressor,
@@ -38,6 +36,7 @@ export BGZFReader,
     VirtualOffset,
     virtual_seek,
     virtual_position,
+    get_virtual_offset,
     write_empty_block,
     load_gzi,
     write_gzi,
@@ -70,7 +69,8 @@ The current values are:
   not EOF, and its buffer can't grow to encompass a whole BGZF block
 * `insufficient_writer_space`: A BGZF writer wraps an `AbstractBufWriter` whose buffer
   cannot grow to encompass a full BGZF block
-* `unsorted_index`: Attempted to load a malformed GZI file with unsorted coordinates
+* `unsorted_index`: Attempted to load a malformed GZI file with unsorted coordinates,
+  or with a file index > 2^48, or with a block size > 2^16.
 * `operation_on_error`: Attempted an operation on a BGZF reader or writer in an
   error state.
 """
@@ -112,7 +112,45 @@ struct BGZFError <: Exception
     type::Union{BGZFErrorType, LibDeflateError}
 end
 
-# TODO: Show method. Give hint if operation_on_error
+function Base.showerror(io::IO, err::BGZFError)
+    str = IOBuffer()
+    print(str, "BGZFError: ")
+    if err.file_offset !== nothing
+        print(str, "Error in block at offset ", err.file_offset, ": ")
+    end
+    type = err.type
+    if type isa LibDeflateError
+        print(str, "Error in parsing gzip content: ", err.type)
+    else
+        if type == BGZFErrors.truncated_file
+            print(str, "BGZF file ends without EOF marker block, or block is malformed by being too short")
+        elseif type == BGZFErrors.missing_bc_field
+            print(str, "BC field in block is missing or malformed")
+        elseif type == BGZFErrors.block_offset_out_of_bounds
+            print(str, "Seek to block offset larger than block size")
+        elseif type == BGZFErrors.insufficient_reader_space
+            print(
+                str, "BGZF reader's underlying `AbstractBufReader` has a buffer that can hold neither " *
+                    "the entire file content, nor a full BGZF block. Make sure to use an underlying `AbstractBufReader` type " *
+                    "with a buffer that can contain at least 2^16 bytes, or the full BGZF input"
+            )
+        elseif type == BGZFErrors.insufficient_writer_space
+            print(
+                str, "BGZF writer's underlying `AbstractBufWriter` has a buffer that cannot hold a full BGZF block. " *
+                    "Make sure to use an underlying `AbstractBufWriter` type" *
+                    "with a buffer that can contain at least 2^16 bytes"
+            )
+        elseif type == BGZFErrors.unsorted_index
+            print(str, "Attempted to construct or load a GZIndex whose offsets are not sorted in ascending order")
+        else
+            print(
+                str, "Attempted a read/write operation on a reader or writer in an error state. " *
+                    "BGZF readers can be reset from an error state by seeking"
+            )
+        end
+    end
+    return print(io, String(take!(str)))
+end
 
 const BitInteger = Union{UInt8, UInt16, UInt32, UInt64, Int8, Int16, Int32, Int64}
 
