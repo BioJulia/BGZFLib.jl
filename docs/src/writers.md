@@ -20,9 +20,12 @@ Like BGZF readers, there is a `BGZFWriter` and a `SyncBGZFWriter` with the same 
 ### Constructing BGZF writers
 Both BGZF writers conform to the [AbstractBufWriter interface](file:///home/jakni/code/BufferIO.jl/docs/build/writers/index.html).
 
-The buffers of the BGZF writers are fixed in size. Calling `BufferIO.grow_buffer` on them will perform a shallow flush instead of expanding the buffer.
+The buffers of the BGZF writers are fixed in size. Calling `BufferIO.grow_buffer` on them will perform a shallow flush instead of expanding the buffer,
+i.e. it will write its current content to the underlying IO.
 
-The `SyncBGZFWriter` wraps an existing `AbstractBufWriter`. This inner writer must be able to present a buffer of at least size 2^16, else a `BGZFError(nothing, BGZFErrors.insufficient_writer_space)` will be thrown.
+The `SyncBGZFWriter` wraps an existing `AbstractBufWriter`. This inner writer must be able to present a buffer of at least 2^16 bytes,
+else a `BGZFError(nothing, BGZFErrors.insufficient_writer_space)` will be thrown.
+If the starting buffer size of the `AbstractBufWriter` is smaller than 2^16 bytes, `BufferIO.grow_buffer` will be called repeatedly on the underlying `AbstractBufWriter`.
 
 When creating a `SyncBGZFWriter` from an `T <: IO`, a `SyncBGZFWriter{BufWriter{T}}` is created. Since `BufWriter` has an expanding buffer, it can always accomodate 2^16 bytes.
 

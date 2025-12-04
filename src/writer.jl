@@ -282,7 +282,7 @@ end
 function flush_next_result_queue(io::BGZFWriter)::Int
     n_flushed = 0
     while !isempty(io.result_queue) && !isnothing(first(io.result_queue))
-        fst = popfirst!(io.result_queue)
+        fst = something(popfirst!(io.result_queue)) # we just checked for is nothing
         io.n_removed += 1
         n_flushed += write(io.io, fst)
         push!(io.buffer_pool, parent(fst))
