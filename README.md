@@ -32,5 +32,7 @@ $ bgzip -dc /tmp/foo.gz
 Hello, world
 ```
 
+For more examples, see the documentation: https://biojulia.dev/BGZFLib.jl/stable/
+
 ## Questions?
 If you have a question about contributing or using BioJulia software, come on over and chat to us on [the Julia Slack workspace](https://julialang.org/slack/), or you can try the [Bio category of the Julia discourse site](https://discourse.julialang.org/c/domain/bio).
