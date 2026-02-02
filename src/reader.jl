@@ -542,7 +542,7 @@ function get_reader_block_work(io::BGZFReader)::Union{Nothing, ReaderBlockWork, 
         destination = pop!(io.buffer_pool)
         copy!(source, result.payload)
         consume(io.io, Int(result.block_size))
-        file_offset = io.n_bytes_read + consumed
+        file_offset = io.n_bytes_read
         io.n_bytes_read += result.block_size
         return ReaderBlockWork(ImmutableMemoryView(source), destination, file_offset, result.expected_crc32, result.decompressed_len)
     end

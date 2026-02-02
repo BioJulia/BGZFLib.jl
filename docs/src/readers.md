@@ -115,7 +115,7 @@ try
     read(reader)
 catch error
     @assert error isa BGZFError
-    @assert error.type isa LibDeflateError
+    @assert error.type == BGZFErrors.truncated_file
 end
 
 # Trying to read from a reader in an error state will throw

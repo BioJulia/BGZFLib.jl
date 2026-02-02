@@ -56,7 +56,6 @@ end
 
 function SyncBGZFReader(f, io::Union{AbstractBufReader, IO}; kwargs...)
     reader = SyncBGZFReader(io; kwargs...)
-    reader = SyncBGZFReader(io, ; kwargs...)
     return try
         f(reader)
     finally
@@ -183,7 +182,8 @@ julia> read(reader, String)
 julia> seek(reader, 45); # NB: Not start of BGZF block
 
 julia> read(reader, UInt8)
-ERROR: BGZFError: Error in block at offset 0: Error in parsing gzip content: gzip_bad_magic_bytes
+ERROR: BGZFError: Error in block at offset 0: BGZF file ends without EOF marker block, or block is malformed by being too short
+[...]
 
 julia> close(reader)
 ```
@@ -202,7 +202,7 @@ function BufferIO.fill_buffer(io::SyncBGZFReader)
     io.state == STATE_CLOSED && return 0
     io.state == STATE_ERROR && throw(BGZFError(nothing, BGZFErrors.operation_on_error))
 
-    io.stop > io.start && return nothing
+    io.stop >= io.start && return nothing
     io.start = 1
     io.stop = 0
     last_was_empty = io.check_truncated ? io.last_was_empty : nothing

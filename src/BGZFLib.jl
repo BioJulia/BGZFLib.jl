@@ -99,7 +99,7 @@ Note that exceptions thrown by BGZF readers and writers are not guaranteed to be
 as they may also throw `BufferIO.IOError`s, or exceptions propagated by their underlying IO.
 
 This error contains two public properties:
-* `block_offset::Union{Nothing, Int}` gives the zero-based offset in the compressed stream
+* `file_offset::Union{Nothing, Int}` gives the zero-based offset in the compressed stream
    of the block where the error occurred.
    Some errors may not occur at a specific block, in which case this is `nothing`.
 * `type::Union{BGZFErrorType, LibDeflateError}`. If the blocks are malformed gzip blocks, this
@@ -358,7 +358,7 @@ function parse_bgzf_block!(
     # Header is 12 bytes
     length(buffer) < 12 && return BGZFErrors.truncated_file
     ex_len = (@inbounds buffer[11] % Int) | ((@inbounds buffer[12] % Int) << 8)
-    length(buffer) < 12 + ex_len && BGZFErrors.truncated_file
+    length(buffer) < 12 + ex_len && return BGZFErrors.truncated_file
 
     # Parse and validate the entire gzip header
     GC.@preserve buffer begin
