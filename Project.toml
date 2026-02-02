@@ -1,7 +1,7 @@
 name = "BGZFLib"
 uuid = "b86bd9b6-aa64-492d-a0e2-e61a004d8aed"
-version = "0.1.0"
-authors = ["Jakob Nybo Nissen <jakobnybonissen@gmail.com>"]
+version = "0.1.1"
+authors = ["Jakob Nybo Andersen <jnandersen@proton.me>"]
 
 [deps]
 BufferIO = "ff366017-094f-4144-bd70-a828a0d67152"

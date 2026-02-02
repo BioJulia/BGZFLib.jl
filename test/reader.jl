@@ -170,6 +170,28 @@ end
     end
 end
 
+@testset "virtual_position file_offset after empty blocks" begin
+    for n_workers in [1, 4]
+        reader = BGZFReader(CursorReader(gz1_data); n_workers)
+        # gz1_data has empty blocks interspersed. Read all data and verify
+        # that virtual_position round-trips: seek back to each saved position
+        # and read the same data.
+        positions = VirtualOffset[]
+        while !eof(reader)
+            push!(positions, virtual_position(reader))
+            fill_buffer(reader)
+            buf = get_buffer(reader)
+            isempty(buf) && break
+            consume(reader, length(buf))
+        end
+        for vo in positions
+            virtual_seek(reader, vo)
+            @test virtual_position(reader) == vo
+        end
+        close(reader)
+    end
+end
+
 @testset "Error recovery with seek" begin
     for n_workers in [1, 4]
         data = append!(copy(gz1_data), b"bad data")

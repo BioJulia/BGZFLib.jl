@@ -66,7 +66,7 @@ true
 """
 function write_gzi(io::Union{AbstractBufWriter, IO}, index::GZIndex)
     blocks = index.blocks
-    write(io, htol(length(blocks)))
+    write(io, htol(length(blocks) % UInt64))
     if htol(0x0102) != 0x0102
         error("This function assumes little-endian CPUs.")
     end
@@ -93,6 +93,8 @@ function validate_blocks(blocks::ImmutableMemoryView{IndexBlock})
     isempty(blocks) && return true
     fst = @inbounds blocks[1]
     (co, dco) = (fst.compressed_offset, fst.decompressed_offset)
+    # Offset of first blocks are always zero
+    co == dco == 0 || return false
     # We don't return early because we want this function to SIMD,
     # and we expect that almost all GZIndices are sorted, so returning
     # early would inhibit SIMD for little gain.
@@ -191,7 +193,7 @@ true
 index_bgzf(io::IO) = index_bgzf(BufReader(io))
 
 function index_bgzf(io::AbstractBufReader)
-    decompressed_offset = compressed_offset = 0
+    decompressed_offset = compressed_offset = UInt64(0)
     blocks = IndexBlock[]
     gzip_fields = GzipExtraField[]
     while true

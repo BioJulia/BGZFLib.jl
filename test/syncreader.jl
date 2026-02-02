@@ -228,6 +228,21 @@ end
     close(reader)
 end
 
+@testset "Truncated extra field data" begin
+    buf = zeros(UInt8, 14)
+    buf[1] = 0x1f; buf[2] = 0x8b; buf[3] = 0x08; buf[4] = 0x04
+    buf[11] = 0xc8; buf[12] = 0x00 # ex_len = 200, but buffer is only 14 bytes
+    reader = SyncBGZFReader(CursorReader(buf); check_truncated = false)
+    err = try
+        read(reader); nothing
+    catch e
+        e
+    end
+    @test err isa BGZFError
+    @test err.type === BGZFLib.BGZFErrors.truncated_file
+    close(reader)
+end
+
 @testset "Error recovery with seek" begin
     data = append!(copy(gz1_data), b"bad data")
     reader = SyncBGZFReader(CursorReader(data))

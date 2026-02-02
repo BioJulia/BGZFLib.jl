@@ -79,6 +79,19 @@ end
         @test_throws BGZFError GZIndex(blocks)
     end
 
+    @testset "Nonzero first block offsets throws error" begin
+        @test_throws BGZFError GZIndex(
+            [
+                (compressed_offset = UInt64(100), decompressed_offset = UInt64(0)),
+            ]
+        )
+        @test_throws BGZFError GZIndex(
+            [
+                (compressed_offset = UInt64(0), decompressed_offset = UInt64(100)),
+            ]
+        )
+    end
+
     @testset "Empty blocks vector" begin
         blocks = typeof((compressed_offset = UInt64(0), decompressed_offset = UInt64(0)))[]
         gzi = GZIndex(blocks)

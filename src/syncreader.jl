@@ -56,7 +56,6 @@ end
 
 function SyncBGZFReader(f, io::Union{AbstractBufReader, IO}; kwargs...)
     reader = SyncBGZFReader(io; kwargs...)
-    reader = SyncBGZFReader(io, ; kwargs...)
     return try
         f(reader)
     finally
@@ -202,7 +201,7 @@ function BufferIO.fill_buffer(io::SyncBGZFReader)
     io.state == STATE_CLOSED && return 0
     io.state == STATE_ERROR && throw(BGZFError(nothing, BGZFErrors.operation_on_error))
 
-    io.stop > io.start && return nothing
+    io.stop >= io.start && return nothing
     io.start = 1
     io.stop = 0
     last_was_empty = io.check_truncated ? io.last_was_empty : nothing
