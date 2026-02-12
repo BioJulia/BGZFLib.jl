@@ -314,20 +314,19 @@ function get_reader_block_work(
         buffer = get_reader_source_room(underlying)
         if isnothing(buffer)
             if last_was_empty === false
-                return (; consumed, result = BGZFError(consumed, BGZFErrors.truncated_file))
+                return (; consumed, result = BGZFError(offset_at_block_start + consumed, BGZFErrors.truncated_file))
             end
             return (; consumed, result = nothing)
         end
 
         parsed = parse_bgzf_block!(gzip_extra_fields, buffer)
         if parsed isa LibDeflateError
-            return (; consumed, result = BGZFError(consumed, parsed))
+            return (; consumed, result = BGZFError(offset_at_block_start + consumed, parsed))
         elseif parsed isa BGZFErrorType
-            return (; consumed, result = BGZFError(consumed, parsed))
+            return (; consumed, result = BGZFError(offset_at_block_start + consumed, parsed))
         else
             if iszero(parsed.decompressed_len)
                 consumed += parsed.block_size
-                offset_at_block_start += parsed.block_size
                 consume(underlying, Int(parsed.block_size))
                 if last_was_empty === false
                     last_was_empty = true

@@ -253,6 +253,21 @@ end
     @test read(reader, 10) == b"Hello, wor"
 end
 
+@testset "Malformed trailing data reports true file offset" begin
+    data = append!(copy(gz1_data), b"bad data")
+    reader = SyncBGZFReader(CursorReader(data))
+    err = try
+        read(reader)
+        nothing
+    catch e
+        e
+    end
+    @test err isa BGZFError
+    @test err.type === BGZFLib.BGZFErrors.truncated_file
+    @test err.file_offset == length(gz1_data)
+    close(reader)
+end
+
 @testset "show" begin
     # We just test that showing doesn't error
     buf = IOBuffer()

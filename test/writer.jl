@@ -2,6 +2,15 @@ function bgzfread(v::VecWriter)
     return SyncBGZFReader(read, CursorReader(v.vec))
 end
 
+import BufferIO
+
+mutable struct TinyWriter <: BufferIO.AbstractBufWriter
+    buffer::Memory{UInt8}
+end
+
+BufferIO.get_buffer(io::TinyWriter) = MemoryView(io.buffer)
+BufferIO.grow_buffer(io::TinyWriter) = 0
+
 @testset "From AbstractBufWriter" begin
     io = VecWriter()
     writer = BGZFWriter(io; n_workers = 2)
@@ -10,6 +19,18 @@ end
     close(writer)
 
     @test String(bgzfread(io)) == "test data"
+end
+
+@testset "Fixed-size writer errors in constructor" begin
+    io = TinyWriter(Memory{UInt8}(undef, 8))
+    err = try
+        BGZFWriter(io; n_workers = 1)
+        nothing
+    catch e
+        e
+    end
+    @test err isa BGZFError
+    @test err.type === BGZFLib.BGZFErrors.insufficient_writer_space
 end
 
 @testset "From IO" begin
