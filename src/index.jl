@@ -260,6 +260,6 @@ function get_virtual_offset(gzi::GZIndex, offset::Int)::Union{Nothing, VirtualOf
     idx < 1 && return nothing
     block = gzi.blocks[idx]
     block_offset = offset - block.decompressed_offset
-    block_offset > 2^16 && return nothing
+    block_offset >= 2^16 && return nothing
     return VirtualOffset(block.compressed_offset, block_offset)
 end

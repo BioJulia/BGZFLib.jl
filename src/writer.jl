@@ -86,6 +86,8 @@ function BGZFWriter(
     )
     in(compress_level, 1:12) || throw(ArgumentError("compress_level must be in 1:12"))
     n_workers < 1 && throw(ArgumentError("Must have at least one worker"))
+    # Ensure enough capacity to write a full block
+    get_writer_sink_room(io)
     sender = Channel{WriterWork}(Inf)
     receiver = Channel{WriterResult}(Inf)
     # Have some more buffers than 2 x workers, just to keep things more smooth
@@ -203,10 +205,6 @@ BufferIO.grow_buffer(io::BGZFWriter) = _grow_buffer(io).grown
 
 function _grow_buffer(io::BGZFWriter)::@NamedTuple{n_flushed::Int, grown::Int}
     check_open(io)
-
-    if io.state == STATE_ERROR
-        throw(BGZFError(nothing, BGZFErrors.operation_on_error))
-    end
 
     n_flushed = 0
 

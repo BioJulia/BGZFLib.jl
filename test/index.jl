@@ -187,6 +187,8 @@ end
 
         @test get_virtual_offset(gzi, -1) === nothing
         @test get_virtual_offset(gzi, 100_000) === nothing
+        max_last_block = Int(last(gzi.blocks).decompressed_offset) + 2^16
+        @test get_virtual_offset(gzi, max_last_block) === nothing
     end
 end
 

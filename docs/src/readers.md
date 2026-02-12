@@ -69,7 +69,7 @@ reader = CursorReader(bgzf_data[1:end-28])
 String(read(BGZFReader(reader)))
 
 # output
-ERROR: BGZFError: Error in block at offset 0: BGZF file ends without EOF marker block, or block is malformed by being too short
+ERROR: BGZFError: Error in block at offset 323: BGZF file ends without EOF marker block, or block is malformed by being too short
 [...]
 ```
 

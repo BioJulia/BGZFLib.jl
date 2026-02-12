@@ -182,7 +182,7 @@ julia> read(reader, String)
 julia> seek(reader, 45); # NB: Not start of BGZF block
 
 julia> read(reader, UInt8)
-ERROR: BGZFError: Error in block at offset 0: BGZF file ends without EOF marker block, or block is malformed by being too short
+ERROR: BGZFError: Error in block at offset 45: BGZF file ends without EOF marker block, or block is malformed by being too short
 [...]
 
 julia> close(reader)
