@@ -189,6 +189,7 @@ julia> close(reader)
 ```
 """
 function Base.seek(io::SyncBGZFReader, offset::Int)
+    io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
     seek(io.io, offset)
     io.stop = 0
     io.start = 1

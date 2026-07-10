@@ -206,8 +206,14 @@ function BufferIO.consume(io::BGZFReader, n::Int)
 end
 
 function Base.close(io::BGZFReader)
-    # Close channels to finish the workers
-    close(io.receiver)
+    io.state == STATE_CLOSED && return nothing
+    # Closing the sender terminates the worker loops: a worker only ever blocks on
+    # taking from the sender, since the receiver is unbounded so `put!` never blocks.
+    # A worker mid-block finishes, puts its result onto the still-open receiver, then
+    # exits because the sender is closed.
+    # We deliberately do NOT close the receiver: doing so would make an in-flight
+    # worker's `put!` throw. Leaving it open lets such workers finish cleanly, and the
+    # channel (with any leftover results) is then garbage collected.
     close(io.sender)
     empty!(io.sender)
     empty!(io.result_queue)
@@ -216,7 +222,6 @@ function Base.close(io::BGZFReader)
     io.underlying_is_eof_or_malformed = true
     close(io.io)
     io.state = STATE_CLOSED
-    empty!(io.receiver)
     return nothing
 end
 
@@ -416,7 +421,7 @@ function BufferIO.fill_buffer(io::BGZFReader)
     # We just try this function again. This can't happen twice, because after the
     # loop above, we have all the buffers, and so can queue new work which cannot
     # be invalid.
-    seen_invalidated && fill_buffer(io)
+    seen_invalidated && return fill_buffer(io)
 
     # No data in buffer, no workers were active, even after queuing all workers
     # until EOF. If we reach this point, we are EOF.
