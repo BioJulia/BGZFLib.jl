@@ -1,6 +1,6 @@
 module BGZFLib
 
-using MemoryViews: MemoryView, ImmutableMemoryView, MutableMemoryView
+using MemoryViews: MemoryView, ImmutableMemoryView, MutableMemoryView, unsafe_memory
 using LibDeflate: Compressor,
     Decompressor,
     GzipExtraField,

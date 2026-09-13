@@ -252,7 +252,7 @@ function Base.seek(io::BGZFReader, offset::Int)
     # Empty the queue. We ignore errors, and recycle any buffers
     for result in io.result_queue
         if result isa Tuple
-            push!(io.buffer_pool, parent(result[2]))
+            push!(io.buffer_pool, unsafe_memory(result[2]))
         end
     end
     empty!(io.result_queue)
@@ -329,7 +329,7 @@ function reader_worker_loop(
                 end
             end
             push!(block_results, block_result)
-            push!(buffers, parent(source))
+            push!(buffers, unsafe_memory(source))
             if block_result isa BGZFError
                 push!(buffers, destination)
             end
@@ -487,7 +487,7 @@ function take_package!(io::BGZFReader)
         for i in eachindex(result.results)
             res = result.results[i]
             if !isa(res, BGZFError)
-                push!(io.buffer_pool, parent(res[2]))
+                push!(io.buffer_pool, unsafe_memory(res[2]))
             end
         end
         return nothing
@@ -512,7 +512,7 @@ function take_buffer_if_some!(io::BGZFReader)::Union{Nothing, Int}
     elseif result isa Tuple{Int, ImmutableMemoryView{UInt8}}
         (block_offset, buffer) = result
         io.current_block_offset = block_offset
-        io.buffer = parent(buffer)
+        io.buffer = unsafe_memory(buffer)
         io.filled = last(only(parentindices(buffer)))
         io.consumed = 0
         popfirst!(io.result_queue)
