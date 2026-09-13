@@ -283,7 +283,7 @@ function flush_next_result_queue(io::BGZFWriter)::Int
         fst = something(popfirst!(io.result_queue)) # we just checked for is nothing
         io.n_removed += 1
         n_flushed += write(io.io, fst)
-        push!(io.buffer_pool, parent(fst))
+        push!(io.buffer_pool, unsafe_memory(fst))
     end
     return n_flushed
 end
@@ -307,7 +307,7 @@ function writer_worker_loop(
         end
         result = WriterResult(
             work.work_index,
-            parent(work.uncompressed),
+            unsafe_memory(work.uncompressed),
             ImmutableMemoryView(work.destination)[1:n_written],
         )
         put!(result_channel, result)
