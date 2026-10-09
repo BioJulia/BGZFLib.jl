@@ -21,6 +21,10 @@
 
         # Block offset too large
         @test_throws ArgumentError VirtualOffset(0, 2^16)
+
+        # Negative offsets
+        @test_throws ArgumentError VirtualOffset(-1, 0)
+        @test_throws ArgumentError VirtualOffset(0, -1)
     end
 
     @testset "Comparison" begin
@@ -37,6 +41,11 @@
         @test cmp(vo1, vo2) == -1
         @test cmp(vo2, vo1) == 1
         @test cmp(vo1, vo4) == 0
+
+        @test sort([vo3, vo1, vo2]) == [vo1, vo2, vo3]
+        @test max(vo1, vo3, vo2) == vo3
+        @test isless(vo1, vo2)
+        @test !isless(vo1, vo4)
     end
 
     @testset "Show" begin
@@ -92,10 +101,8 @@ end
         )
     end
 
-    @testset "Empty blocks vector" begin
-        blocks = typeof((compressed_offset = UInt64(0), decompressed_offset = UInt64(0)))[]
-        gzi = GZIndex(blocks)
-        @test gzi.blocks == blocks
+    @testset "Empty blocks vector throws error" begin
+        @test_throws ArgumentError GZIndex(BGZFLib.IndexBlock[])
     end
 end
 
@@ -205,4 +212,60 @@ end
 
     # Should match
     @test original_gzi.blocks == loaded_gzi.blocks
+end
+
+function gzi_bytes(entries)
+    io = VecWriter()
+    write(io, htol(UInt64(length(entries))))
+    for (co, dco) in entries
+        write(io, htol(UInt64(co)), htol(UInt64(dco)))
+    end
+    return io.vec
+end
+
+@testset "htslib GZI compatibility" begin
+    @testset "Load GZI written by bgzip" begin
+        # Output of `bgzip -r` on data/1.gz. htslib omits the first block, and
+        # only stores the last of consecutive blocks with the same decompressed offset
+        data = gzi_bytes([(44, 13), (115, 22), (178, 23), (223, 37), (271, 54)])
+        gzi = load_gzi(CursorReader(data))
+        @test [(Int(i.compressed_offset), Int(i.decompressed_offset)) for i in gzi.blocks] ==
+            [(0, 0), (44, 13), (115, 22), (178, 23), (223, 37), (271, 54)]
+
+        reader = SyncBGZFReader(CursorReader(gz1_data))
+        decompressed = read(reader)
+        for dco in [0, 5, 13, 22, 30, 60]
+            virtual_seek(reader, get_virtual_offset(gzi, dco))
+            @test read(reader) == decompressed[(dco + 1):end]
+        end
+        close(reader)
+    end
+
+    @testset "Load GZI with only one block" begin
+        gzi = load_gzi(CursorReader(gzi_bytes(Tuple{Int, Int}[])))
+        @test gzi.blocks == [(compressed_offset = UInt64(0), decompressed_offset = UInt64(0))]
+    end
+
+    @testset "Load GZI with explicit first block" begin
+        data = gzi_bytes([(0, 0), (44, 13), (84, 22)])
+        gzi = load_gzi(CursorReader(data))
+        @test [(Int(i.compressed_offset), Int(i.decompressed_offset)) for i in gzi.blocks] ==
+            [(0, 0), (44, 13), (84, 22)]
+    end
+
+    @testset "Written GZI omits first block" begin
+        gzi = index_bgzf(CursorReader(gz1_data))
+        io = VecWriter()
+        @test write_gzi(io, gzi) == 8 + 16 * (length(gzi.blocks) - 1)
+        @test io.vec == gzi_data
+    end
+
+    @testset "Index of empty file round trips" begin
+        gzi = index_bgzf(CursorReader(UInt8[]))
+        @test gzi.blocks == [(compressed_offset = UInt64(0), decompressed_offset = UInt64(0))]
+        io = VecWriter()
+        @test write_gzi(io, gzi) == 8
+        @test load_gzi(CursorReader(io.vec)).blocks == gzi.blocks
+        @test get_virtual_offset(gzi, 0) == VirtualOffset(0, 0)
+    end
 end

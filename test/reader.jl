@@ -74,6 +74,19 @@ end
     end
 end
 
+@testset "BGZFReader - eof with only empty blocks remaining" begin
+    for n_workers in [1, 4]
+        reader = BGZFReader(CursorReader(BGZFLib.EOF_BLOCK); n_workers)
+        @test eof(reader)
+        close(reader)
+
+        data = vcat(BGZFLib.EOF_BLOCK, BGZFLib.EOF_BLOCK)
+        reader = BGZFReader(CursorReader(data); n_workers)
+        @test eof(reader)
+        close(reader)
+    end
+end
+
 @testset "Seeking" begin
     @testset "seekstart" begin
         for n_workers in [1, 4]
@@ -170,6 +183,18 @@ end
     end
 end
 
+@testset "BGZFReader - out of bounds virtual_seek sets error state" begin
+    for n_workers in [1, 4]
+        test_virtual_seek_out_of_bounds(io -> BGZFReader(io; n_workers))
+    end
+end
+
+@testset "BGZFReader - virtual_position at EOF and after seek" begin
+    for n_workers in [1, 4]
+        test_virtual_position_eof((io; kw...) -> BGZFReader(io; n_workers, kw...))
+    end
+end
+
 @testset "virtual_position file_offset after empty blocks" begin
     for n_workers in [1, 4]
         reader = BGZFReader(CursorReader(gz1_data); n_workers)
@@ -209,6 +234,28 @@ end
         # Attempting to read one byte from malformed block errors.
         @test_throws BGZFError read(reader, UInt8)
 
+        close(reader)
+    end
+end
+
+@testset "Close in middle of block" begin
+    for n_workers in [1, 4]
+        reader = BGZFReader(CursorReader(gz1_data); n_workers)
+        read(reader, 3)
+        close(reader)
+        @test isempty(get_buffer(reader))
+        @test eof(reader)
+        @test read(reader) == UInt8[]
+    end
+end
+
+@testset "Parse error is last in result queue" begin
+    for n_workers in [1, 4]
+        data = append!(copy(gz1_data), b"bad data")
+        reader = BGZFReader(CursorReader(data); n_workers)
+        fill_buffer(reader)
+        @test last(reader.result_queue) isa BGZFError
+        @test_throws BGZFError read(reader)
         close(reader)
     end
 end

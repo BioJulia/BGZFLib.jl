@@ -10,8 +10,8 @@ $(MAX_BLOCK_SIZE), or be able to grow its buffer to this size.
 If `check_truncated`, the last BGZF block in the file must be empty, otherwise the reader
 throws an error. This can be used to detect the file was truncated.
 
-Unlike `BGZFReader`, the decompression happens in in serial in the main task.
-This is slower and does not enable paralellism, but may be preferable in situations
+Unlike `BGZFReader`, the decompression happens serially in the main task.
+This is slower and does not enable parallelism, but may be preferable in situations
 where task scheduling or contention is an issue.
 
 If the reader encounters an error, it goes into an error state and throws an exception.
@@ -25,7 +25,7 @@ mutable struct SyncBGZFReader{T <: AbstractBufReader} <: AbstractBufReader
     start::Int
     stop::Int
     n_bytes_read::Int
-    current_block_size::UInt32
+    current_block_offset::Int
     const check_truncated::Bool
     last_was_empty::Bool
     state::UInt8
@@ -80,7 +80,7 @@ function BufferIO.consume(io::SyncBGZFReader, n::Int)
     return nothing
 end
 
-Base.isopen(io::SyncBGZFReader) = io.state == STATE_OPEN
+Base.isopen(io::SyncBGZFReader) = io.state != STATE_CLOSED
 
 function throw_error(io::SyncBGZFReader, err::BGZFError)
     io.start = 1
@@ -90,7 +90,7 @@ function throw_error(io::SyncBGZFReader, err::BGZFError)
 end
 
 function Base.close(io::SyncBGZFReader)
-    isopen(io) || return nothing
+    io.state == STATE_CLOSED && return nothing
     io.start = 1
     io.stop = 0
     empty!(io.gzip_extra_fields)
@@ -124,7 +124,7 @@ julia> close(reader)
 ```
 """
 function virtual_position(io::SyncBGZFReader)
-    return VirtualOffset(io.n_bytes_read - io.current_block_size, io.start - 1)
+    return VirtualOffset(io.current_block_offset, io.start - 1)
 end
 
 """
@@ -132,6 +132,10 @@ end
 
 Seek to the virtual position `vo`. The virtual position is usually obtained by
 a call to `virtual_position`.
+
+If the block offset of `vo` is larger than the size of the block, the reader enters
+an error state and throws a `BGZFError` with `BGZFErrors.block_offset_out_of_bounds`.
+Like other errors, the reader can be reset by seeking.
 
 See also: [`VirtualOffset`](@ref), [`virtual_position`](@ref)
 
@@ -155,7 +159,7 @@ function virtual_seek(io::SyncBGZFReader, vo::VirtualOffset)
     seek(io, Int(vo.file_offset % Int))
     fill_buffer(io)
     if io.stop < vo.block_offset
-        throw(BGZFError(vo.file_offset % Int, BGZFErrors.block_offset_out_of_bounds))
+        throw_error(io, BGZFError(vo.file_offset % Int, BGZFErrors.block_offset_out_of_bounds))
     end
     io.start += vo.block_offset
     return io
@@ -195,6 +199,7 @@ function Base.seek(io::SyncBGZFReader, offset::Int)
     io.start = 1
     io.last_was_empty = false
     io.n_bytes_read = offset
+    io.current_block_offset = offset
     io.state = STATE_OPEN
     return io
 end
@@ -207,21 +212,18 @@ function BufferIO.fill_buffer(io::SyncBGZFReader)
     io.start = 1
     io.stop = 0
     last_was_empty = io.check_truncated ? io.last_was_empty : nothing
-    (; consumed, result) = get_reader_block_work(io.io, io.gzip_extra_fields, last_was_empty, io.n_bytes_read)
+    (; consumed, last_empty_offset, result) = get_reader_block_work(io.io, io.gzip_extra_fields, last_was_empty, io.n_bytes_read)
     io.n_bytes_read += consumed
     if result === nothing
+        io.current_block_offset = eof_offset(io.current_block_offset, io.last_was_empty, io.n_bytes_read, last_empty_offset)
         io.last_was_empty = true
-        # An empty block is 28 bytes: 12 bytes header + 6 bytes extra data +
-        # 2 bytes for DEFLATE compression of empty payload + 8 bytes for crc32
-        # and decompressed length, both as UInt32.
-        io.current_block_size = 28
         return 0
     elseif result isa BGZFError
         throw_error(io, result)
     else
         io.last_was_empty = false
         (; payload, block_size, decompressed_len, expected_crc32) = result
-        io.current_block_size = block_size
+        io.current_block_offset = io.n_bytes_read
         destination = io.buffer
         GC.@preserve payload destination begin
             libdeflate_return = unsafe_decompress!(

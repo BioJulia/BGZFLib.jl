@@ -8,8 +8,13 @@ Construct a GZI index of a BGZF file. The vector `blocks` contains one pair of i
 each block in the BGZF file, in order, containing the zero-based offset of the compressed
 data and the corresponding decompressed data, respectively.
 
-Throw a `BGZFError(nothing, BGZFErrors.unsorted_index)` if either of the offsets are not
-sorted in ascending order.
+`blocks` must not be empty, and its first element must be `(0, 0)`, since every BGZF file
+is indexed by at least its first block. This matches the GZI format, where the first
+block is implicit.
+
+Throw an `ArgumentError` if `blocks` is empty.
+Throw a `BGZFError(nothing, BGZFErrors.unsorted_index)` if the first element is not `(0, 0)`,
+or if either of the offsets are not sorted in ascending order.
 
 Usually constructed with [`index_bgzf`](@ref), or [`load_gzi`](@ref)
 and serialized with `write(io, ::GZIndex)`.
@@ -23,6 +28,7 @@ struct GZIndex
     blocks::Vector{IndexBlock}
 
     function GZIndex(v::Vector{IndexBlock})
+        isempty(v) && throw(ArgumentError("GZIndex must contain at least one block"))
         if !validate_blocks(ImmutableMemoryView(v))
             throw(BGZFError(nothing, BGZFErrors.unsorted_index))
         end
@@ -44,6 +50,9 @@ Write a `GZIndex` to `io` in GZI format, and return the number of written bytes.
 Currently, this function only works on little-endian CPUs, and will
 throw an `ErrorException` on big-endian platforms.
 
+Like htslib, the first block at offsets `(0, 0)` is implicit and is not written to
+the GZI file.
+
 The resulting file can be loaded with [`load_gzi`](@ref) and obtain
 an index equivalent to `index`.
 
@@ -56,7 +65,7 @@ julia> gzi = load_gzi(CursorReader(gzi_data))::GZIndex;
 julia> io = VecWriter();
 
 julia> write_gzi(io, gzi)
-152
+136
 
 julia> gzi_2 = load_gzi(CursorReader(io.vec));
 
@@ -65,16 +74,20 @@ true
 ```
 """
 function write_gzi(io::Union{AbstractBufWriter, IO}, index::GZIndex)
-    blocks = index.blocks
-    write(io, htol(length(blocks) % UInt64))
     if htol(0x0102) != 0x0102
         error("This function assumes little-endian CPUs.")
     end
-    GC.@preserve blocks begin
-        p = Ptr{UInt8}(pointer(blocks))
-        unsafe_write(io, p, sizeof(blocks) % UInt)
+    blocks = index.blocks
+    # The first block is always at (0, 0) and is implicit in GZI files
+    n_written = length(blocks) - 1
+    write(io, htol(n_written % UInt64))
+    if !iszero(n_written)
+        GC.@preserve blocks begin
+            p = Ptr{UInt8}(pointer(blocks, 2))
+            unsafe_write(io, p, (16 * n_written) % UInt)
+        end
     end
-    return 8 + 16 * length(blocks)
+    return 8 + 16 * n_written
 end
 
 function get_buffer_with_length(io::AbstractBufReader, len::Int)::Union{Nothing, ImmutableMemoryView{UInt8}}
@@ -90,7 +103,7 @@ function get_buffer_with_length(io::AbstractBufReader, len::Int)::Union{Nothing,
 end
 
 function validate_blocks(blocks::ImmutableMemoryView{IndexBlock})
-    isempty(blocks) && return true
+    isempty(blocks) && return false
     fst = @inbounds blocks[1]
     (co, dco) = (fst.compressed_offset, fst.decompressed_offset)
     # Offset of first blocks are always zero
@@ -115,6 +128,11 @@ end
     load_gzi(io::Union{IO, AbstractBufReader})::GZIndex
 
 Load a `GZIndex` from a GZI file.
+
+GZI files, as written by htslib, do not store the first block at offsets `(0, 0)`.
+This block is added to the resulting `GZIndex`. For compatibility with GZI files
+written by older versions of BGZFLib, which did store it, it is not added again if
+the first block in the file is `(0, 0)`.
 
 Throw an `IOError(IOErrorKinds.EOF)` if `io` does not contain enough bytes for a valid
 GZI file. Throw a `BGZFError(nothing, BGZFErrors.unsorted_index)` if the offsets are not
@@ -155,13 +173,22 @@ function load_gzi(io::AbstractBufReader)
     # No way the file is 1 PiB in size, so this is reasonable
     len > 2^48 && throw(IOError(IOErrorKinds.EOF))
     len = len % Int
-    blocks = Vector{IndexBlock}(undef, len)
+    # The first block at (0, 0) is implicit in GZI files
+    blocks = Vector{IndexBlock}(undef, len + 1)
+    blocks[1] = (; compressed_offset = UInt64(0), decompressed_offset = UInt64(0))
     total_bytes = 16 * len
     # Julia guarantees the memory layout of bitstypes so this will work.
     GC.@preserve blocks begin
-        n_read = unsafe_read(io, Ptr{UInt8}(pointer(blocks)), total_bytes % UInt)
+        n_read = unsafe_read(io, Ptr{UInt8}(pointer(blocks, 2)), total_bytes % UInt)
     end
     n_read == total_bytes || throw(IOError(IOErrorKinds.EOF))
+    for i in 2:lastindex(blocks)
+        (; compressed_offset, decompressed_offset) = blocks[i]
+        blocks[i] = (; compressed_offset = ltoh(compressed_offset), decompressed_offset = ltoh(decompressed_offset))
+    end
+    if len > 0 && blocks[2] == blocks[1]
+        popfirst!(blocks)
+    end
     return GZIndex(blocks)
 end
 
@@ -198,8 +225,12 @@ function index_bgzf(io::AbstractBufReader)
     gzip_fields = GzipExtraField[]
     while true
         buffer = get_reader_source_room(io)
-        # Empty file is a valid BGZF file
-        isnothing(buffer) && return new_index_bgzf(blocks)
+        if isnothing(buffer)
+            # An empty file is indexed like a file with one empty block, for compatibility
+            # with GZI files, which can't represent an index with no blocks.
+            isempty(blocks) && push!(blocks, (; compressed_offset, decompressed_offset))
+            return new_index_bgzf(blocks)
+        end
         parsed = parse_bgzf_block!(gzip_fields, buffer)
         if parsed isa Union{BGZFErrorType, LibDeflateError}
             throw(BGZFError(compressed_offset, parsed))

@@ -2,10 +2,10 @@
     SyncBGZFWriter(io::T <: AbstractBufWriter; kwargs)::SyncBGZFWriter{T}
     SyncBGZFWriter(io::T <: IO; kwargs)::SyncBGZFWriter{BufWriter{T}}
 
-Create a `SyncBGZFWriter <: AbstractBufWriter` that writes compresses data written to it,
+Create a `SyncBGZFWriter <: AbstractBufWriter` that compresses data written to it,
 and writes the compressed BGZF file to the underlying `io`.
 
-This type differs from `BGZFWriter` in that it does the compression serial in the main task.
+This type differs from `BGZFWriter` in that it does the compression serially in the main task.
 Therefore it is slower when multiple threads are present, but does not incur Task- and scheduling
 overhead.
 
@@ -17,10 +17,15 @@ The keyword arguments are:
   the best compression ratio. It defaults to an intermediate level of compression.
 * `append_empty::Bool = true`. If set, closing the `SyncBGZFWriter` will write an empty BGZF block,
   indicating EOF.
+
+`SyncBGZFWriter(f, io; kwargs...)` creates the writer, calls `f` on it, then closes it.
+If `f` throws, the empty EOF block is not written, so that readers can detect
+the output is incomplete.
 """
 mutable struct SyncBGZFWriter{T <: AbstractBufWriter} <: AbstractBufWriter
     const io::T
-    const buffer::Memory{UInt8}
+    # Replaced with an empty buffer when closed, so writes after closing throw
+    buffer::Memory{UInt8}
     compressor::Union{Nothing, Compressor}
     # 1+1:n_filled is consumed and unflushed
     # n_filled+1:end is unconsumed
@@ -46,6 +51,10 @@ function SyncBGZFWriter(f, io::Union{AbstractBufWriter, IO}; kwargs...)
     writer = SyncBGZFWriter(io; kwargs...)
     return try
         f(writer)
+    catch
+        # Don't mark the output as complete if `f` failed
+        writer.append_empty = false
+        rethrow()
     finally
         close(writer)
     end
@@ -72,7 +81,7 @@ function BufferIO.grow_buffer(io::SyncBGZFWriter)::Int
     check_open(io)
 
     # The type does not support actually growing the underlying buffer.
-    # Hence, if buffer is full (i.e. has no filled bytes), don't grow but return zero.
+    # Hence, if the buffer is empty (i.e. has no filled bytes), don't grow but return zero.
     iszero(io.n_filled) && return 0
 
     # Else, flush to make room.
@@ -80,11 +89,17 @@ function BufferIO.grow_buffer(io::SyncBGZFWriter)::Int
 end
 
 function Base.close(io::SyncBGZFWriter)
-    shallow_flush(io)
-    io.append_empty && write(io.io, EOF_BLOCK)
-    flush(io.io)
-    close(io.io)
-    io.compressor = nothing
+    isopen(io) || return nothing
+    try
+        shallow_flush(io)
+        io.append_empty && write(io.io, EOF_BLOCK)
+        flush(io.io)
+    finally
+        io.compressor = nothing
+        io.buffer = DUMMY_BUFFER
+        io.n_filled = 0
+        close(io.io)
+    end
     return nothing
 end
 
@@ -100,7 +115,7 @@ function compress_and_flush_buffer(io::SyncBGZFWriter)::Int
     @assert length(src) ≤ SAFE_DECOMPRESSED_SIZE
     dst = get_writer_sink_room(io.io)
     compress_result = compress_block!(dst, ImmutableMemoryView(src), something(io.compressor))
-    write(io.io, dst[1:compress_result])
+    consume(io.io, compress_result)
     io.n_filled = 0
     return length(src)
 end

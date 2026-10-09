@@ -13,6 +13,14 @@ end
 # From this point on, we assume the reader behaves the same whether
 # it's backed by an IO or an AbstractBufReader type, and we will only
 # test with `CursorReader`.
+@testset "SyncBGZFReader - out of bounds virtual_seek sets error state" begin
+    test_virtual_seek_out_of_bounds(SyncBGZFReader)
+end
+
+@testset "SyncBGZFReader - virtual_position at EOF and after seek" begin
+    test_virtual_position_eof(SyncBGZFReader)
+end
+
 @testset "SyncBGZFReader - virtual_position and virtual_seek" begin
     reader = SyncBGZFReader(CursorReader(gz1_data))
 
@@ -251,6 +259,17 @@ end
 
     seekstart(reader)
     @test read(reader, 10) == b"Hello, wor"
+end
+
+@testset "Close in error state closes underlying" begin
+    data = append!(copy(gz1_data), b"bad data")
+    underlying = IOBuffer(data)
+    reader = SyncBGZFReader(underlying)
+    @test_throws BGZFError read(reader)
+    @test isopen(reader)
+    close(reader)
+    @test !isopen(reader)
+    @test !isopen(underlying)
 end
 
 @testset "Malformed trailing data reports true file offset" begin
