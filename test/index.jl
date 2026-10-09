@@ -76,7 +76,24 @@ end
             (compressed_offset = 0x000000000000002c, decompressed_offset = 0x000000000000000d),
         ]
 
-        @test_throws BGZFError GZIndex(blocks)
+        err = try
+            GZIndex(blocks)
+            nothing
+        catch e
+            e
+        end
+        @test err isa BGZFError
+        @test err.type == BGZFErrors.invalid_index
+    end
+
+    @testset "Large compressed distance between blocks" begin
+        # Empty blocks are not indexed, so consecutive indexed blocks
+        # may be more than 2^16 bytes apart in the compressed stream
+        blocks = [
+            (compressed_offset = UInt64(0), decompressed_offset = UInt64(0)),
+            (compressed_offset = UInt64(100_000), decompressed_offset = UInt64(10)),
+        ]
+        @test GZIndex(blocks).blocks == blocks
     end
 
     @testset "Unsorted decompressed offsets throws error" begin
@@ -173,7 +190,7 @@ end
 
         # Read from all the blocks in the index
         for (; compressed_offset, decompressed_offset) in gzi.blocks
-            virtual_seek(reader, VirtualOffset(compressed_offset, 0))
+            seek(reader, VirtualOffset(compressed_offset, 0))
             @test read(reader) == decompressed[(decompressed_offset + 1):end]
         end
 
@@ -186,7 +203,7 @@ end
         decompressed = read(reader)
         for dco in [0, 5, 10, 30, 45, 60]
             vo = get_virtual_offset(gzi, dco)
-            virtual_seek(reader, vo)
+            seek(reader, vo)
             v = read(reader)
             @test v == decompressed[(dco + 1):end]
         end
@@ -225,8 +242,7 @@ end
 
 @testset "htslib GZI compatibility" begin
     @testset "Load GZI written by bgzip" begin
-        # Output of `bgzip -r` on data/1.gz. htslib omits the first block, and
-        # only stores the last of consecutive blocks with the same decompressed offset
+        # Output of `bgzip -r` on data/1.gz. htslib omits the first block and empty blocks
         data = gzi_bytes([(44, 13), (115, 22), (178, 23), (223, 37), (271, 54)])
         gzi = load_gzi(CursorReader(data))
         @test [(Int(i.compressed_offset), Int(i.decompressed_offset)) for i in gzi.blocks] ==
@@ -235,7 +251,7 @@ end
         reader = SyncBGZFReader(CursorReader(gz1_data))
         decompressed = read(reader)
         for dco in [0, 5, 13, 22, 30, 60]
-            virtual_seek(reader, get_virtual_offset(gzi, dco))
+            seek(reader, get_virtual_offset(gzi, dco))
             @test read(reader) == decompressed[(dco + 1):end]
         end
         close(reader)
@@ -267,5 +283,50 @@ end
         @test write_gzi(io, gzi) == 8
         @test load_gzi(CursorReader(io.vec)).blocks == gzi.blocks
         @test get_virtual_offset(gzi, 0) == VirtualOffset(0, 0)
+    end
+end
+
+@testset "index_bgzf matches bgzip" begin
+    # Each element is either a string, written as one block, or `:empty`, an empty block.
+    # The expected indexed blocks are those that `bgzip --reindex` (htslib 1.24) creates:
+    # The first block is (0, 0), and the remaining are the non-empty blocks after the
+    # first non-empty block.
+    cases = [
+        ([:empty, "abc"], Int[]),
+        (["abc", :empty, :empty, "defg"], [4]),
+        (["abc", :empty], Int[]),
+        (Any[], Int[]),
+        ([:empty, :empty, "abc", "de"], [4]),
+    ]
+    for (parts, indexed) in cases
+        io = VecWriter()
+        block_offsets = Int[]
+        decompressed_offsets = Int[]
+        n_decompressed = 0
+        SyncBGZFWriter(io) do writer
+            for part in parts
+                push!(block_offsets, length(io.vec))
+                push!(decompressed_offsets, n_decompressed)
+                if part === :empty
+                    write_empty_block(writer)
+                else
+                    write(writer, part)
+                    shallow_flush(writer)
+                    n_decompressed += ncodeunits(part)
+                end
+            end
+        end
+        expected = [(0, 0); [(block_offsets[i], decompressed_offsets[i]) for i in indexed]]
+        gzi = index_bgzf(CursorReader(io.vec))
+        @test [(Int(i.compressed_offset), Int(i.decompressed_offset)) for i in gzi.blocks] == expected
+
+        # Seeking to all decompressed offsets with the index, like htslib does
+        content = SyncBGZFReader(read, CursorReader(io.vec))
+        reader = SyncBGZFReader(CursorReader(io.vec))
+        for offset in 0:length(content)
+            seek(reader, get_virtual_offset(gzi, offset))
+            @test read(reader) == content[(offset + 1):end]
+        end
+        close(reader)
     end
 end

@@ -58,7 +58,7 @@ function test_virtual_position_eof(make_reader)
         @test eof(reader)
         @test virtual_position(reader) == expected
 
-        virtual_seek(reader, expected)
+        seek(reader, expected)
         @test virtual_position(reader) == expected
         @test read(reader) == UInt8[]
         close(reader)
@@ -67,16 +67,16 @@ function test_virtual_position_eof(make_reader)
     # Seek to the start of a block, then get the position before reading
     reader = make_reader(CursorReader(gz1_data); check_truncated = true)
     read(reader, 30)
-    seek(reader, 44)
+    seek(reader, VirtualOffset(44, 0))
     @test virtual_position(reader) == VirtualOffset(44, 0)
     return close(reader)
 end
 
 # `make_reader(io)` constructs a BGZF reader
-function test_virtual_seek_out_of_bounds(make_reader)
+function test_seek_out_of_bounds(make_reader)
     reader = make_reader(CursorReader(gz1_data))
     err = try
-        virtual_seek(reader, VirtualOffset(0, 100))
+        seek(reader, VirtualOffset(0, 100))
         nothing
     catch e
         e
@@ -94,8 +94,37 @@ function test_virtual_seek_out_of_bounds(make_reader)
     @test err.type == BGZFErrors.operation_on_error
 
     # Seeking resets the error state
-    virtual_seek(reader, VirtualOffset(0, 7))
+    seek(reader, VirtualOffset(0, 7))
     @test read(reader, 6) == b"world!"
+
+    # The block at offset 147 is empty, so like htslib, the block offset
+    # applies to the next non-empty block at offset 178
+    seek(reader, VirtualOffset(147, 5))
+    @test virtual_position(reader) == VirtualOffset(178, 5)
+    @test read(reader, 9) == b"some more"
+    seek(reader, VirtualOffset(147, 0))
+    @test read(reader, 14) == b"then some more"
+    return close(reader)
+end
+
+# `make_reader(io)` constructs a BGZF reader
+function test_seek_api(make_reader)
+    reader = make_reader(CursorReader(gz1_data))
+    @test_throws MethodError seek(reader, 44)
+
+    read(reader, 3)
+    seekstart(reader)
+    @test virtual_position(reader) == VirtualOffset(0, 0)
+    @test read(reader, 5) == b"Hello"
+
+    # If seeking the underlying IO fails, the reader is unchanged
+    @test_throws IOError seek(reader, VirtualOffset(length(gz1_data) + 1, 0))
+    @test virtual_position(reader) == VirtualOffset(0, 5)
+    @test read(reader, 8) == b", world!"
+
+    # Seek to a position that is not the start of a block
+    @test_throws BGZFError seek(reader, VirtualOffset(45, 0))
+    @test_throws BGZFError read(reader)
     return close(reader)
 end
 

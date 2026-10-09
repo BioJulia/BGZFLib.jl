@@ -104,9 +104,9 @@ end
     virtual_position(io::Union{SyncBGZFReader, BGZFReader})::VirtualOffset
 
 Get the `VirtualOffset` of the current BGZF reader. The virtual offset is a
-position in the decompressed stream. Seek to the position using `virtual_seek`.
+position in the decompressed stream. Seek to the position using `seek`.
 
-See also: [`VirtualOffset`](@ref), [`virtual_seek`](@ref)
+See also: [`VirtualOffset`](@ref), [`seek`](@ref Base.seek(::SyncBGZFReader, ::VirtualOffset))
 
 # Examples
 ```jldoctest
@@ -128,71 +128,76 @@ function virtual_position(io::SyncBGZFReader)
 end
 
 """
-    virtual_seek(io::Union{SyncBGZFReader, BGZFReader}, vo::VirtualOffset) -> io
+    seek(io::Union{SyncBGZFReader, BGZFReader}, vo::VirtualOffset) -> io
 
-Seek to the virtual position `vo`. The virtual position is usually obtained by
-a call to `virtual_position`.
+Seek to the virtual offset `vo`, i.e. `vo.block_offset` bytes into the decompressed
+content of the BGZF block that starts at `vo.file_offset` in the compressed stream.
+The virtual offset is usually obtained with [`virtual_position`](@ref)
+or [`get_virtual_offset`](@ref).
 
-If the block offset of `vo` is larger than the size of the block, the reader enters
-an error state and throws a `BGZFError` with `BGZFErrors.block_offset_out_of_bounds`.
-Like other errors, the reader can be reset by seeking.
+Seeking reads and decompresses the block at `vo.file_offset`. If that fails, e.g. because
+`vo.file_offset` is not the start of a BGZF block, the reader enters an error state and
+throws a `BGZFError`. If `vo.block_offset` is larger than the decompressed size of the block,
+the reader enters an error state and throws a `BGZFError` with
+`BGZFErrors.block_offset_out_of_bounds`.
+Seeking resets a reader in an error state.
+
+The underlying IO must support `seek`. If seeking the underlying IO throws, the reader
+is left unchanged.
+
+`seekstart(io)` is equivalent to `seek(io, VirtualOffset(0, 0))`.
+
+# Edge cases
+* If the block at `vo.file_offset` is empty, the reader skips to the next non-empty
+  block, and `vo.block_offset` applies to that block, like in htslib.
+  This can happen with offsets obtained from a `GZIndex`, since GZI files do not index
+  empty blocks. After seeking, `virtual_position` reports the position in the non-empty
+  block, not `vo`.
+* If the reader checks for truncation, seeking to the end of the compressed stream
+  throws a `BGZFError` with `BGZFErrors.truncated_file`, since the reader cannot know
+  whether the stream ends with an empty block. Instead, seek to the start of the final
+  empty block. This is the position returned by `virtual_position` at EOF.
 
 See also: [`VirtualOffset`](@ref), [`virtual_position`](@ref)
 
+# Examples
 ```jldoctest
 julia> reader = SyncBGZFReader(CursorReader(bgzf_data));
 
-julia> virtual_seek(reader, VirtualOffset(178, 14));
+julia> seek(reader, VirtualOffset(178, 14));
 
 julia> String(read(reader))
 "more content herethis is another block"
 
-julia> virtual_seek(reader, VirtualOffset(0, 0));
+julia> seek(reader, VirtualOffset(0, 0));
 
 julia> String(read(reader, 13))
 "Hello, world!"
 
-julia> close(reader)
-```
-"""
-function virtual_seek(io::SyncBGZFReader, vo::VirtualOffset)
-    seek(io, Int(vo.file_offset % Int))
-    fill_buffer(io)
-    if io.stop < vo.block_offset
-        throw_error(io, BGZFError(vo.file_offset % Int, BGZFErrors.block_offset_out_of_bounds))
-    end
-    io.start += vo.block_offset
-    return io
-end
-
-"""
-    seek(io::Union{SyncBGZFReader, BGZFReader}, offset::Int)
-
-Seek to the zero-indexed position in the *compressed stream* `offset`. This position
-must be the beginning of a BGZF block, else the reader will error when trying to read
-after the seek.
-`seek(io, offset)` is equivalent to `seek(io, VirtualOffset(offset, 0))`.
-`seek(io, 0)` works, and is equivalent to `seekstart(io)`.
-
-# Examples
-```jldoctest
-julia> reader = BGZFReader(CursorReader(bgzf_data));
-
-julia> seek(reader, 44);
-
-julia> read(reader, String)
-"more dataxthen some moremore content herethis is another block"
-
-julia> seek(reader, 45); # NB: Not start of BGZF block
-
-julia> read(reader, UInt8)
+julia> seek(reader, VirtualOffset(45, 0)); # NB: Not start of BGZF block
 ERROR: BGZFError: Error in block at offset 45: BGZF file ends without EOF marker block, or block is malformed by being too short
 [...]
 
 julia> close(reader)
 ```
 """
-function Base.seek(io::SyncBGZFReader, offset::Int)
+function Base.seek(io::SyncBGZFReader, vo::VirtualOffset)
+    file_offset = vo.file_offset % Int
+    seek_block(io, file_offset)
+    # If the block at `file_offset` is empty, this skips to the next non-empty block,
+    # and the block offset applies to that block, like in htslib.
+    fill_buffer(io)
+    if io.stop < vo.block_offset
+        throw_error(io, BGZFError(file_offset, BGZFErrors.block_offset_out_of_bounds))
+    end
+    io.start += vo.block_offset
+    return io
+end
+
+Base.seekstart(io::SyncBGZFReader) = seek(io, VirtualOffset(0, 0))
+
+# Seek to the start of the block at zero-based offset `offset` in the compressed stream
+function seek_block(io::SyncBGZFReader, offset::Int)
     io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
     seek(io.io, offset)
     io.stop = 0

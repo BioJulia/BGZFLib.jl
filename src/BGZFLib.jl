@@ -36,7 +36,6 @@ export BGZFReader,
     BGZFError,
     GZIndex,
     VirtualOffset,
-    virtual_seek,
     virtual_position,
     get_virtual_offset,
     write_empty_block,
@@ -71,8 +70,9 @@ The current values are:
   not EOF, and its buffer can't grow to encompass a whole BGZF block
 * `insufficient_writer_space`: A BGZF writer wraps an `AbstractBufWriter` whose buffer
   cannot grow to encompass a full BGZF block
-* `unsorted_index`: Attempted to load a malformed GZI file with unsorted coordinates,
-  or with a file index > 2^48, or with a block size > 2^16.
+* `invalid_index`: Attempted to construct or load an invalid GZI index: Its first block
+  is not at offsets `(0, 0)`, its offsets are not sorted, a compressed offset is ≥ 2^48,
+  or two consecutive decompressed offsets differ by more than 2^16.
 * `operation_on_error`: Attempted an operation on a BGZF reader or writer in an
   error state.
 """
@@ -83,7 +83,7 @@ module BGZFErrors
         block_offset_out_of_bounds
         insufficient_reader_space
         insufficient_writer_space
-        unsorted_index
+        invalid_index
         operation_on_error
     end
 
@@ -142,8 +142,8 @@ function Base.showerror(io::IO, err::BGZFError)
                     "Make sure to use an underlying `AbstractBufWriter` type " *
                     "with a buffer that can contain at least 2^16 bytes"
             )
-        elseif type == BGZFErrors.unsorted_index
-            print(str, "Attempted to construct or load a GZIndex whose offsets are not sorted in ascending order")
+        elseif type == BGZFErrors.invalid_index
+            print(str, "Attempted to construct or load an invalid GZIndex")
         else
             print(
                 str, "Attempted a read/write operation on a reader or writer in an error state. " *
@@ -208,12 +208,12 @@ julia> reader = SyncBGZFReader(CursorReader(bgzf_data));
 julia> vo = VirtualOffset(178, 5)
 VirtualOffset(178, 5)
 
-julia> virtual_seek(reader, vo);
+julia> seek(reader, vo);
 
 julia> String(read(reader, 9))
 "some more"
 
-julia> virtual_seek(reader, VirtualOffset(0, 7));
+julia> seek(reader, VirtualOffset(0, 7));
 
 julia> String(read(reader, 6))
 "world!"

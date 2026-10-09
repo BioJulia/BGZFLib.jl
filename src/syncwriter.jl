@@ -13,7 +13,7 @@ If `io::AbstractBufWriter`, `io` must be able to buffer up to 2^16 bytes, else a
 `BGZFError(nothing, BGZFErrors.insufficient_writer_space)` is thrown.
 
 The keyword arguments are:
-* `compresslevel::Int`: Set compression level from 1 to 12, with 12 being slowest but with
+* `compress_level::Int`: Set compression level from 1 to 12, with 12 being slowest but with
   the best compression ratio. It defaults to an intermediate level of compression.
 * `append_empty::Bool = true`. If set, closing the `SyncBGZFWriter` will write an empty BGZF block,
   indicating EOF.
@@ -33,18 +33,18 @@ mutable struct SyncBGZFWriter{T <: AbstractBufWriter} <: AbstractBufWriter
     append_empty::Bool
 end
 
-function SyncBGZFWriter(io::AbstractBufWriter; append_empty::Bool = true, compresslevel::Int = 6)
-    in(compresslevel, 1:12) || throw(ArgumentError("compresslevel must be in 1:12"))
+function SyncBGZFWriter(io::AbstractBufWriter; append_empty::Bool = true, compress_level::Int = 6)
+    in(compress_level, 1:12) || throw(ArgumentError("compress_level must be in 1:12"))
     # Ensure underlying writer has room for a full block. This is necessary, because we compress
     # straight to `io`'s buffer.
     get_writer_sink_room(io)
     buffer = Memory{UInt8}(undef, SAFE_DECOMPRESSED_SIZE)
-    return SyncBGZFWriter{typeof(io)}(io, buffer, Compressor(compresslevel % UInt8), 0, append_empty)
+    return SyncBGZFWriter{typeof(io)}(io, buffer, Compressor(compress_level % UInt8), 0, append_empty)
 end
 
-function SyncBGZFWriter(io::IO; append_empty::Bool = true, compresslevel::Int = 6)
+function SyncBGZFWriter(io::IO; append_empty::Bool = true, compress_level::Int = 6)
     buf = BufWriter(io, MAX_BLOCK_SIZE)
-    return SyncBGZFWriter(buf; append_empty, compresslevel)
+    return SyncBGZFWriter(buf; append_empty, compress_level)
 end
 
 function SyncBGZFWriter(f, io::Union{AbstractBufWriter, IO}; kwargs...)

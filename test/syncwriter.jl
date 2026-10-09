@@ -100,7 +100,7 @@ end
 @testset "Function argument constructor" begin
     io = VecWriter()
 
-    result = SyncBGZFWriter(io; append_empty = true, compresslevel = 6) do writer
+    result = SyncBGZFWriter(io; append_empty = true, compress_level = 6) do writer
         @test isopen(writer)
         @test write(writer, b"Hello, ") == 7
         @test write(writer, b"world!") == 6

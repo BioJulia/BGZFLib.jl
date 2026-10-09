@@ -241,7 +241,8 @@ function throw_error(io::BGZFReader, err::BGZFError)
     throw(err)
 end
 
-function Base.seek(io::BGZFReader, offset::Int)
+# Seek to the start of the block at zero-based offset `offset` in the compressed stream
+function seek_block(io::BGZFReader, offset::Int)
     io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
 
     seek(io.io, offset)
@@ -277,15 +278,20 @@ function virtual_position(io::BGZFReader)
     return VirtualOffset(io.current_block_offset, io.consumed)
 end
 
-function virtual_seek(io::BGZFReader, vo::VirtualOffset)
-    seek(io, vo.file_offset % Int)
+function Base.seek(io::BGZFReader, vo::VirtualOffset)
+    file_offset = vo.file_offset % Int
+    seek_block(io, file_offset)
+    # If the block at `file_offset` is empty, this skips to the next non-empty block,
+    # and the block offset applies to that block, like in htslib.
     fill_buffer(io)
     if io.filled < vo.block_offset
-        throw_error(io, BGZFError(vo.file_offset % Int, BGZFErrors.block_offset_out_of_bounds))
+        throw_error(io, BGZFError(file_offset, BGZFErrors.block_offset_out_of_bounds))
     end
     io.consumed += vo.block_offset
     return io
 end
+
+Base.seekstart(io::BGZFReader) = seek(io, VirtualOffset(0, 0))
 
 function Base.show(io::IO, reader::BGZFReader)
     summary(io, reader)
