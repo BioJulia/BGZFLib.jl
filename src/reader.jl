@@ -146,7 +146,7 @@ function BGZFReader(
     pool = [Memory{UInt8}(undef, MAX_BLOCK_SIZE) for _ in 1:total_buffers(n_workers)]
     workers = Memory{Task}(undef, n_workers)
     for i in 1:n_workers
-        task = errormonitor(Threads.@spawn reader_worker_loop(sender, receiver))
+        task = Threads.@spawn reader_worker_loop(sender, receiver)
         workers[i] = task
     end
     return BGZFReader{typeof(io)}(

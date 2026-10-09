@@ -102,7 +102,7 @@ function BGZFWriter(
     pool = [Memory{UInt8}(undef, 4 * MAX_BLOCK_SIZE) for _ in 1:(2 * n_workers + min(2, cld(n_workers, 2)))]
     workers = Memory{Task}(undef, n_workers)
     for i in 1:n_workers
-        task = errormonitor(Threads.@spawn writer_worker_loop(sender, receiver, compress_level))
+        task = Threads.@spawn writer_worker_loop(sender, receiver, compress_level)
         workers[i] = task
     end
     return BGZFWriter{typeof(io)}(
