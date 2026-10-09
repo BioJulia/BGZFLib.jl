@@ -293,7 +293,7 @@ function writer_worker_loop(
         result_channel::Channel{WriterResult},
         compress_level::Int,
     )
-    compressor = Compressor(compress_level)
+    compressor = Compressor(compress_level % UInt8)
     for work in work_channel
         n_written = 0
         @assert length(work.uncompressed) ≤ WRITER_BLOCKS * SAFE_DECOMPRESSED_SIZE

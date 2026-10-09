@@ -29,11 +29,12 @@ mutable struct SyncBGZFWriter{T <: AbstractBufWriter} <: AbstractBufWriter
 end
 
 function SyncBGZFWriter(io::AbstractBufWriter; append_empty::Bool = true, compresslevel::Int = 6)
+    in(compresslevel, 1:12) || throw(ArgumentError("compresslevel must be in 1:12"))
     # Ensure underlying writer has room for a full block. This is necessary, because we compress
     # straight to `io`'s buffer.
     get_writer_sink_room(io)
     buffer = Memory{UInt8}(undef, SAFE_DECOMPRESSED_SIZE)
-    return SyncBGZFWriter{typeof(io)}(io, buffer, Compressor(compresslevel), 0, append_empty)
+    return SyncBGZFWriter{typeof(io)}(io, buffer, Compressor(compresslevel % UInt8), 0, append_empty)
 end
 
 function SyncBGZFWriter(io::IO; append_empty::Bool = true, compresslevel::Int = 6)

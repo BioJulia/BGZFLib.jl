@@ -8,6 +8,8 @@ using LibDeflate: Compressor,
     unsafe_decompress!,
     unsafe_compress!,
     unsafe_crc32,
+    ReadableMemory,
+    WriteableMemory,
     LibDeflateError,
     LibDeflateErrors
 
@@ -361,7 +363,7 @@ function parse_bgzf_block!(
 
     # Parse and validate the entire gzip header
     GC.@preserve buffer begin
-        parsed_header = unsafe_parse_gzip_header(pointer(buffer), (12 + ex_len) % UInt, gzip_extra_fields)
+        parsed_header = unsafe_parse_gzip_header(ReadableMemory(pointer(buffer), 12 + ex_len), gzip_extra_fields)
     end
     parsed_header isa LibDeflateError && return parsed_header
 
@@ -371,7 +373,7 @@ function parse_bgzf_block!(
     end
     fieldnum === nothing && return BGZFErrors.missing_bc_field
     field = @inbounds gzip_extra_fields[fieldnum]
-    (field.data === nothing || length(field.data) != 2) && return BGZFErrors.missing_bc_field
+    length(field.data) != 2 && return BGZFErrors.missing_bc_field
     block_size = ((buffer[first(field.data)] % Int) | ((buffer[last(field.data)] % Int) << 8)) + 1
     length(buffer) < block_size && return BGZFErrors.truncated_file
 
@@ -397,17 +399,16 @@ function compress_block!(
     @assert length(dst) ≥ MAX_BLOCK_SIZE
     GC.@preserve dst src begin
         # Note: This should never be able to error, so we typeassert here
+        src_memory = ReadableMemory(pointer(src), length(src))
         libdeflate_return = unsafe_compress!(
             compressor,
-            pointer(dst) + 18,
-            length(dst) - 18,
-            pointer(src),
-            length(src),
-        )::Int
-        crc32 = unsafe_crc32(pointer(src), length(src))
+            WriteableMemory(pointer(dst) + 18, length(dst) - 18),
+            src_memory,
+        )::UInt
+        crc32 = unsafe_crc32(src_memory)
     end
     # Header is 12 bytes. 6 bytes for the BC field. 8 bytes for CRC and decompressed size
-    block_size = 18 + 8 + libdeflate_return
+    block_size = 18 + 8 + libdeflate_return % Int
     # Copy header over, including first 4 bytes of BC field
     copyto!(dst, ImmutableMemoryView(BLOCK_HEADER))
     # Copy BC value over. Note that, if length(src) ≤ SAFE_DECOMPRESSED_SIZE, block_size

@@ -225,19 +225,17 @@ function BufferIO.fill_buffer(io::SyncBGZFReader)
         destination = io.buffer
         GC.@preserve payload destination begin
             libdeflate_return = unsafe_decompress!(
-                Base.HasLength(),
                 something(io.decompressor),
-                pointer(destination),
-                decompressed_len,
-                pointer(payload),
-                length(payload),
+                WriteableMemory(destination),
+                ReadableMemory(pointer(payload), length(payload)),
+                UInt(decompressed_len),
             )
         end
         if libdeflate_return isa LibDeflateError
             throw_error(io, BGZFError(io.n_bytes_read, libdeflate_return))
         else
             GC.@preserve destination begin
-                crc32 = unsafe_crc32(pointer(destination), decompressed_len)
+                crc32 = unsafe_crc32(ReadableMemory(pointer(destination), decompressed_len))
             end
             if crc32 != expected_crc32
                 throw_error(io, BGZFError(io.n_bytes_read, LibDeflateErrors.gzip_bad_crc32))

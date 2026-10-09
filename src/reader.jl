@@ -306,12 +306,10 @@ function reader_worker_loop(
             destination = block_work.destination
             GC.@preserve source destination begin
                 libdeflate_return = unsafe_decompress!(
-                    Base.HasLength(),
                     decompressor,
-                    pointer(destination),
-                    block_work.decompressed_len,
-                    pointer(source),
-                    length(source),
+                    WriteableMemory(destination),
+                    ReadableMemory(pointer(source), length(source)),
+                    UInt(block_work.decompressed_len),
                 )
             end
             # For some reason, having this yield here absolutely tanks performance.
@@ -320,7 +318,7 @@ function reader_worker_loop(
                 BGZFError(block_work.file_offset, libdeflate_return)
             else
                 GC.@preserve destination begin
-                    crc32 = unsafe_crc32(pointer(destination), block_work.decompressed_len)
+                    crc32 = unsafe_crc32(ReadableMemory(pointer(destination), block_work.decompressed_len))
                 end
                 if crc32 != block_work.expected_crc32
                     BGZFError(block_work.file_offset, LibDeflateErrors.gzip_bad_crc32)
