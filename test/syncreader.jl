@@ -13,7 +13,19 @@ end
 # From this point on, we assume the reader behaves the same whether
 # it's backed by an IO or an AbstractBufReader type, and we will only
 # test with `CursorReader`.
-@testset "SyncBGZFReader - virtual_position and virtual_seek" begin
+@testset "SyncBGZFReader - seek" begin
+    test_seek_api(SyncBGZFReader)
+end
+
+@testset "SyncBGZFReader - out of bounds seek sets error state" begin
+    test_seek_out_of_bounds(SyncBGZFReader)
+end
+
+@testset "SyncBGZFReader - virtual_position at EOF and after seek" begin
+    test_virtual_position_eof(SyncBGZFReader)
+end
+
+@testset "SyncBGZFReader - virtual_position and seek" begin
     reader = SyncBGZFReader(CursorReader(gz1_data))
 
     @testset "Initial virtual position" begin
@@ -51,7 +63,7 @@ end
         saved_vo = virtual_position(reader)
 
         read(reader, 10)
-        virtual_seek(reader, saved_vo)
+        seek(reader, saved_vo)
 
         @test virtual_position(reader) == saved_vo
         @test read(reader, 6) == b"world!"
@@ -59,7 +71,7 @@ end
 
     @testset "Virtual seek to beginning" begin
         read(reader, 20)
-        virtual_seek(reader, VirtualOffset(0, 0))
+        seek(reader, VirtualOffset(0, 0))
 
         @test virtual_position(reader) == VirtualOffset(0, 0)
         @test read(reader, 5) == b"Hello"
@@ -67,7 +79,7 @@ end
 
     @testset "Virtual seek within same block" begin
         seekstart(reader)
-        virtual_seek(reader, VirtualOffset(0, 7))
+        seek(reader, VirtualOffset(0, 7))
 
         @test read(reader, 6) == b"world!"
     end
@@ -79,14 +91,14 @@ end
         vo_second_block = virtual_position(reader)
 
         seekstart(reader)
-        virtual_seek(reader, vo_second_block)
+        seek(reader, vo_second_block)
 
         @test virtual_position(reader) == vo_second_block
     end
 
     @testset "Virtual seek out of bounds throws error" begin
         seekstart(reader)
-        @test_throws BGZFError virtual_seek(reader, VirtualOffset(0, 100))
+        @test_throws BGZFError seek(reader, VirtualOffset(0, 100))
     end
 
     close(reader)
@@ -251,6 +263,37 @@ end
 
     seekstart(reader)
     @test read(reader, 10) == b"Hello, wor"
+end
+
+@testset "Seek within loaded block does not reread it" begin
+    reader = SyncBGZFReader(CursorReader(gz1_data))
+    first_block = first(gz1_content)
+    @test read(reader, length(first_block)) == first_block
+    underlying_pos = position(reader.io)
+
+    # Seeking back into the fully consumed first block reuses the decompressed data
+    seek(reader, VirtualOffset(0, 7))
+    @test position(reader.io) == underlying_pos
+    @test virtual_position(reader) == VirtualOffset(0, 7)
+    @test read(reader, 6) == b"world!"
+
+    # Out of bounds in the loaded block still errors, and seeking recovers
+    @test_throws BGZFError seek(reader, VirtualOffset(0, length(first_block) + 1))
+    @test_throws BGZFError read(reader, UInt8)
+    seek(reader, VirtualOffset(0, 0))
+    @test read(reader) == reduce(vcat, gz1_content)
+    close(reader)
+end
+
+@testset "Close in error state closes underlying" begin
+    data = append!(copy(gz1_data), b"bad data")
+    underlying = IOBuffer(data)
+    reader = SyncBGZFReader(underlying)
+    @test_throws BGZFError read(reader)
+    @test isopen(reader)
+    close(reader)
+    @test !isopen(reader)
+    @test !isopen(underlying)
 end
 
 @testset "Malformed trailing data reports true file offset" begin

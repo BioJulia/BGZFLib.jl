@@ -102,7 +102,7 @@ BGZFErrors
 However, some operations on BGZF readers and writers propagate to their underlying IO, which may throw different errors.
 For example, when calling `seek` on a BGZF reader wrapping a file (e.g. `SyncBGZFReader{BufReader{IOStream}}`), `seek` is also called on the underlying `IOStream`. This may throw another error.
 
-When attempting to read a malformed BGZF file, the reader will throw a `BGZFError` and be in an error state. In this state, some operations like `BufferIO.fill_buffer` and `Base.seek` will throw a `BGZFError(nothing, BGZFErrors.operation_on_error)`.
+When attempting to read a malformed BGZF file, the reader will throw a `BGZFError` and be in an error state. In this state, some operations like `BufferIO.fill_buffer` and `read` will throw a `BGZFError(nothing, BGZFErrors.operation_on_error)`.
 
 To recover the BGZF reader, `seek` to a valid position:
 

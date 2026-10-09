@@ -10,8 +10,8 @@ $(MAX_BLOCK_SIZE), or be able to grow its buffer to this size.
 If `check_truncated`, the last BGZF block in the file must be empty, otherwise the reader
 throws an error. This can be used to detect the file was truncated.
 
-Unlike `BGZFReader`, the decompression happens in in serial in the main task.
-This is slower and does not enable paralellism, but may be preferable in situations
+Unlike `BGZFReader`, the decompression happens serially in the main task.
+This is slower and does not enable parallelism, but may be preferable in situations
 where task scheduling or contention is an issue.
 
 If the reader encounters an error, it goes into an error state and throws an exception.
@@ -25,7 +25,7 @@ mutable struct SyncBGZFReader{T <: AbstractBufReader} <: AbstractBufReader
     start::Int
     stop::Int
     n_bytes_read::Int
-    current_block_size::UInt32
+    current_block_offset::Int
     const check_truncated::Bool
     last_was_empty::Bool
     state::UInt8
@@ -80,7 +80,7 @@ function BufferIO.consume(io::SyncBGZFReader, n::Int)
     return nothing
 end
 
-Base.isopen(io::SyncBGZFReader) = io.state == STATE_OPEN
+Base.isopen(io::SyncBGZFReader) = io.state != STATE_CLOSED
 
 function throw_error(io::SyncBGZFReader, err::BGZFError)
     io.start = 1
@@ -90,7 +90,7 @@ function throw_error(io::SyncBGZFReader, err::BGZFError)
 end
 
 function Base.close(io::SyncBGZFReader)
-    isopen(io) || return nothing
+    io.state == STATE_CLOSED && return nothing
     io.start = 1
     io.stop = 0
     empty!(io.gzip_extra_fields)
@@ -104,9 +104,9 @@ end
     virtual_position(io::Union{SyncBGZFReader, BGZFReader})::VirtualOffset
 
 Get the `VirtualOffset` of the current BGZF reader. The virtual offset is a
-position in the decompressed stream. Seek to the position using `virtual_seek`.
+position in the decompressed stream. Seek to the position using `seek`.
 
-See also: [`VirtualOffset`](@ref), [`virtual_seek`](@ref)
+See also: [`VirtualOffset`](@ref), [`seek`](@ref Base.seek(::SyncBGZFReader, ::VirtualOffset))
 
 # Examples
 ```jldoctest
@@ -124,77 +124,94 @@ julia> close(reader)
 ```
 """
 function virtual_position(io::SyncBGZFReader)
-    return VirtualOffset(io.n_bytes_read - io.current_block_size, io.start - 1)
+    return VirtualOffset(io.current_block_offset, io.start - 1)
 end
 
 """
-    virtual_seek(io::Union{SyncBGZFReader, BGZFReader}, vo::VirtualOffset) -> io
+    seek(io::Union{SyncBGZFReader, BGZFReader}, vo::VirtualOffset) -> io
 
-Seek to the virtual position `vo`. The virtual position is usually obtained by
-a call to `virtual_position`.
+Seek to the virtual offset `vo`, i.e. `vo.block_offset` bytes into the decompressed
+content of the BGZF block that starts at `vo.file_offset` in the compressed stream.
+The virtual offset is usually obtained with [`virtual_position`](@ref)
+or [`get_virtual_offset`](@ref).
+
+Seeking reads and decompresses the block at `vo.file_offset`. If that fails, e.g. because
+`vo.file_offset` is not the start of a BGZF block, the reader enters an error state and
+throws a `BGZFError`. As an optimization, a `SyncBGZFReader` does not reread the block if
+it is the block currently loaded.
+If `vo.block_offset` is larger than the decompressed size of the block, the reader enters
+an error state and throws a `BGZFError` with `BGZFErrors.block_offset_out_of_bounds`.
+Seeking resets a reader in an error state.
+
+The underlying IO must support `seek`. If seeking the underlying IO throws, the reader
+is left unchanged.
+
+`seekstart(io)` is equivalent to `seek(io, VirtualOffset(0, 0))`.
+
+# Edge cases
+* If the block at `vo.file_offset` is empty, the reader skips to the next non-empty
+  block, and `vo.block_offset` applies to that block, like in htslib.
+  This can happen with offsets obtained from a `GZIndex`, since GZI files do not index
+  empty blocks. After seeking, `virtual_position` reports the position in the non-empty
+  block, not `vo`.
+* If the reader checks for truncation, seeking to the end of the compressed stream
+  throws a `BGZFError` with `BGZFErrors.truncated_file`, since the reader cannot know
+  whether the stream ends with an empty block. Instead, seek to the start of the final
+  empty block. This is the position returned by `virtual_position` at EOF.
 
 See also: [`VirtualOffset`](@ref), [`virtual_position`](@ref)
 
+# Examples
 ```jldoctest
 julia> reader = SyncBGZFReader(CursorReader(bgzf_data));
 
-julia> virtual_seek(reader, VirtualOffset(178, 14));
+julia> seek(reader, VirtualOffset(178, 14));
 
 julia> String(read(reader))
 "more content herethis is another block"
 
-julia> virtual_seek(reader, VirtualOffset(0, 0));
+julia> seek(reader, VirtualOffset(0, 0));
 
 julia> String(read(reader, 13))
 "Hello, world!"
 
-julia> close(reader)
-```
-"""
-function virtual_seek(io::SyncBGZFReader, vo::VirtualOffset)
-    seek(io, Int(vo.file_offset % Int))
-    fill_buffer(io)
-    if io.stop < vo.block_offset
-        throw(BGZFError(vo.file_offset % Int, BGZFErrors.block_offset_out_of_bounds))
-    end
-    io.start += vo.block_offset
-    return io
-end
-
-"""
-    seek(io::Union{SyncBGZFReader, BGZFReader}, offset::Int)
-
-Seek to the zero-indexed position in the *compressed stream* `offset`. This position
-must be the beginning of a BGZF block, else the reader will error when trying to read
-after the seek.
-`seek(io, offset)` is equivalent to `seek(io, VirtualOffset(offset, 0))`.
-`seek(io, 0)` works, and is equivalent to `seekstart(io)`.
-
-# Examples
-```jldoctest
-julia> reader = BGZFReader(CursorReader(bgzf_data));
-
-julia> seek(reader, 44);
-
-julia> read(reader, String)
-"more dataxthen some moremore content herethis is another block"
-
-julia> seek(reader, 45); # NB: Not start of BGZF block
-
-julia> read(reader, UInt8)
+julia> seek(reader, VirtualOffset(45, 0)); # NB: Not start of BGZF block
 ERROR: BGZFError: Error in block at offset 45: BGZF file ends without EOF marker block, or block is malformed by being too short
 [...]
 
 julia> close(reader)
 ```
 """
-function Base.seek(io::SyncBGZFReader, offset::Int)
+function Base.seek(io::SyncBGZFReader, vo::VirtualOffset)
+    file_offset = vo.file_offset % Int
+    # If the target block is the one currently loaded, there is no need to read and
+    # decompress it again. A loaded block is never empty, since empty blocks are skipped,
+    # so `io.stop > 0` means a block is loaded.
+    is_loaded = io.state == STATE_OPEN && io.stop > 0 && io.current_block_offset == file_offset
+    if !is_loaded
+        seek_block(io, file_offset)
+        # If the block at `file_offset` is empty, this skips to the next non-empty block,
+        # and the block offset applies to that block, like in htslib.
+        fill_buffer(io)
+    end
+    if io.stop < vo.block_offset
+        throw_error(io, BGZFError(file_offset, BGZFErrors.block_offset_out_of_bounds))
+    end
+    io.start = vo.block_offset + 1
+    return io
+end
+
+Base.seekstart(io::SyncBGZFReader) = seek(io, VirtualOffset(0, 0))
+
+# Seek to the start of the block at zero-based offset `offset` in the compressed stream
+function seek_block(io::SyncBGZFReader, offset::Int)
     io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
     seek(io.io, offset)
     io.stop = 0
     io.start = 1
     io.last_was_empty = false
     io.n_bytes_read = offset
+    io.current_block_offset = offset
     io.state = STATE_OPEN
     return io
 end
@@ -207,37 +224,32 @@ function BufferIO.fill_buffer(io::SyncBGZFReader)
     io.start = 1
     io.stop = 0
     last_was_empty = io.check_truncated ? io.last_was_empty : nothing
-    (; consumed, result) = get_reader_block_work(io.io, io.gzip_extra_fields, last_was_empty, io.n_bytes_read)
+    (; consumed, last_empty_offset, result) = get_reader_block_work(io.io, io.gzip_extra_fields, last_was_empty, io.n_bytes_read)
     io.n_bytes_read += consumed
     if result === nothing
+        io.current_block_offset = eof_offset(io.current_block_offset, io.last_was_empty, io.n_bytes_read, last_empty_offset)
         io.last_was_empty = true
-        # An empty block is 28 bytes: 12 bytes header + 6 bytes extra data +
-        # 2 bytes for DEFLATE compression of empty payload + 8 bytes for crc32
-        # and decompressed length, both as UInt32.
-        io.current_block_size = 28
         return 0
     elseif result isa BGZFError
         throw_error(io, result)
     else
         io.last_was_empty = false
         (; payload, block_size, decompressed_len, expected_crc32) = result
-        io.current_block_size = block_size
+        io.current_block_offset = io.n_bytes_read
         destination = io.buffer
         GC.@preserve payload destination begin
             libdeflate_return = unsafe_decompress!(
-                Base.HasLength(),
                 something(io.decompressor),
-                pointer(destination),
-                decompressed_len,
-                pointer(payload),
-                length(payload),
+                WriteableMemory(destination),
+                ReadableMemory(pointer(payload), length(payload)),
+                UInt(decompressed_len),
             )
         end
         if libdeflate_return isa LibDeflateError
             throw_error(io, BGZFError(io.n_bytes_read, libdeflate_return))
         else
             GC.@preserve destination begin
-                crc32 = unsafe_crc32(pointer(destination), decompressed_len)
+                crc32 = unsafe_crc32(ReadableMemory(pointer(destination), decompressed_len))
             end
             if crc32 != expected_crc32
                 throw_error(io, BGZFError(io.n_bytes_read, LibDeflateErrors.gzip_bad_crc32))

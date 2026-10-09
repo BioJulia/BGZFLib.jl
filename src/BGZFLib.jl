@@ -8,6 +8,8 @@ using LibDeflate: Compressor,
     unsafe_decompress!,
     unsafe_compress!,
     unsafe_crc32,
+    ReadableMemory,
+    WriteableMemory,
     LibDeflateError,
     LibDeflateErrors
 
@@ -34,7 +36,6 @@ export BGZFReader,
     BGZFError,
     GZIndex,
     VirtualOffset,
-    virtual_seek,
     virtual_position,
     get_virtual_offset,
     write_empty_block,
@@ -65,12 +66,13 @@ The current values are:
 * `missing_bc_field`: A block has no `BC` field, or it's malformed
 * `block_offset_out_of_bounds`: Seek with a `VirtualOffset` where the block offset
   is larger than the block size
-* `insufficient_reader_space`: The BGZF reader wraps an `AbstractBufWriter` that is
+* `insufficient_reader_space`: The BGZF reader wraps an `AbstractBufReader` that is
   not EOF, and its buffer can't grow to encompass a whole BGZF block
 * `insufficient_writer_space`: A BGZF writer wraps an `AbstractBufWriter` whose buffer
   cannot grow to encompass a full BGZF block
-* `unsorted_index`: Attempted to load a malformed GZI file with unsorted coordinates,
-  or with a file index > 2^48, or with a block size > 2^16.
+* `invalid_index`: Attempted to construct or load an invalid GZI index: Its first block
+  is not at offsets `(0, 0)`, its offsets are not sorted, a compressed offset is ≥ 2^48,
+  or two consecutive decompressed offsets differ by more than 2^16.
 * `operation_on_error`: Attempted an operation on a BGZF reader or writer in an
   error state.
 """
@@ -81,7 +83,7 @@ module BGZFErrors
         block_offset_out_of_bounds
         insufficient_reader_space
         insufficient_writer_space
-        unsorted_index
+        invalid_index
         operation_on_error
     end
 
@@ -137,11 +139,11 @@ function Base.showerror(io::IO, err::BGZFError)
         elseif type == BGZFErrors.insufficient_writer_space
             print(
                 str, "BGZF writer's underlying `AbstractBufWriter` has a buffer that cannot hold a full BGZF block. " *
-                    "Make sure to use an underlying `AbstractBufWriter` type" *
+                    "Make sure to use an underlying `AbstractBufWriter` type " *
                     "with a buffer that can contain at least 2^16 bytes"
             )
-        elseif type == BGZFErrors.unsorted_index
-            print(str, "Attempted to construct or load a GZIndex whose offsets are not sorted in ascending order")
+        elseif type == BGZFErrors.invalid_index
+            print(str, "Attempted to construct or load an invalid GZIndex")
         else
             print(
                 str, "Attempted a read/write operation on a reader or writer in an error state. " *
@@ -206,12 +208,12 @@ julia> reader = SyncBGZFReader(CursorReader(bgzf_data));
 julia> vo = VirtualOffset(178, 5)
 VirtualOffset(178, 5)
 
-julia> virtual_seek(reader, vo);
+julia> seek(reader, vo);
 
 julia> String(read(reader, 9))
 "some more"
 
-julia> virtual_seek(reader, VirtualOffset(0, 7));
+julia> seek(reader, VirtualOffset(0, 7));
 
 julia> String(read(reader, 6))
 "world!"
@@ -221,15 +223,13 @@ struct VirtualOffset
     x::UInt64
 
     function VirtualOffset(file_offset::Integer, block_offset::Integer)
-        file_offset = UInt64(file_offset)::UInt64
-        block_offset = UInt64(block_offset)::UInt64
-        if file_offset ≥ 2^48
+        if file_offset < 0 || file_offset ≥ 2^48
             throw(ArgumentError("block file offset must be in 0:281474976710655"))
         end
-        if block_offset ≥ 2^16
+        if block_offset < 0 || block_offset ≥ 2^16
             throw(ArgumentError("in-block offset must be in 0:65535"))
         end
-        return new((UInt64(file_offset) << 16) | UInt64(block_offset))
+        return new(((file_offset % UInt64) << 16) | (block_offset % UInt64))
     end
 end
 
@@ -245,7 +245,7 @@ function Base.getproperty(vo::VirtualOffset, s::Symbol)
     end
 end
 
-Base.:(<)(x::VirtualOffset, y::VirtualOffset) = getfield(x, :x) < getfield(y, :x)
+Base.isless(x::VirtualOffset, y::VirtualOffset) = isless(getfield(x, :x), getfield(y, :x))
 Base.cmp(x::VirtualOffset, y::VirtualOffset) = cmp(getfield(x, :x), getfield(y, :x))
 
 function Base.show(io::IO, x::VirtualOffset)
@@ -297,6 +297,8 @@ function get_reader_block_work(
         offset_at_block_start::Int,
     )::@NamedTuple{
         consumed::Int,
+        # Offset of the last skipped empty block, or -1 if none were skipped
+        last_empty_offset::Int,
         result::Union{
             BGZFError,
             Nothing,
@@ -310,22 +312,24 @@ function get_reader_block_work(
     }
     # Loop while we read empty blocks
     consumed = 0
+    last_empty_offset = -1
     while true
         buffer = get_reader_source_room(underlying)
         if isnothing(buffer)
             if last_was_empty === false
-                return (; consumed, result = BGZFError(offset_at_block_start + consumed, BGZFErrors.truncated_file))
+                return (; consumed, last_empty_offset, result = BGZFError(offset_at_block_start + consumed, BGZFErrors.truncated_file))
             end
-            return (; consumed, result = nothing)
+            return (; consumed, last_empty_offset, result = nothing)
         end
 
         parsed = parse_bgzf_block!(gzip_extra_fields, buffer)
         if parsed isa LibDeflateError
-            return (; consumed, result = BGZFError(offset_at_block_start + consumed, parsed))
+            return (; consumed, last_empty_offset, result = BGZFError(offset_at_block_start + consumed, parsed))
         elseif parsed isa BGZFErrorType
-            return (; consumed, result = BGZFError(offset_at_block_start + consumed, parsed))
+            return (; consumed, last_empty_offset, result = BGZFError(offset_at_block_start + consumed, parsed))
         else
             if iszero(parsed.decompressed_len)
+                last_empty_offset = offset_at_block_start + consumed
                 consumed += parsed.block_size
                 consume(underlying, Int(parsed.block_size))
                 if last_was_empty === false
@@ -333,10 +337,18 @@ function get_reader_block_work(
                 end
                 continue
             end
-            return (; consumed, result = parsed)
+            return (; consumed, last_empty_offset, result = parsed)
         end
     end
     return
+end
+
+# The virtual position at EOF is at the start of the final empty block, such that seeking
+# to it does not trigger a truncation error. If there is no such block, it's at the end of
+# the stream. If we're already at EOF (i.e. last_was_empty), it's unchanged.
+function eof_offset(current::Int, last_was_empty::Bool, n_bytes_read::Int, last_empty_offset::Int)::Int
+    last_empty_offset ≥ 0 && return last_empty_offset
+    return last_was_empty ? current : n_bytes_read
 end
 
 function parse_bgzf_block!(
@@ -361,7 +373,7 @@ function parse_bgzf_block!(
 
     # Parse and validate the entire gzip header
     GC.@preserve buffer begin
-        parsed_header = unsafe_parse_gzip_header(pointer(buffer), (12 + ex_len) % UInt, gzip_extra_fields)
+        parsed_header = unsafe_parse_gzip_header(ReadableMemory(pointer(buffer), 12 + ex_len), gzip_extra_fields)
     end
     parsed_header isa LibDeflateError && return parsed_header
 
@@ -371,7 +383,7 @@ function parse_bgzf_block!(
     end
     fieldnum === nothing && return BGZFErrors.missing_bc_field
     field = @inbounds gzip_extra_fields[fieldnum]
-    (field.data === nothing || length(field.data) != 2) && return BGZFErrors.missing_bc_field
+    length(field.data) != 2 && return BGZFErrors.missing_bc_field
     block_size = ((buffer[first(field.data)] % Int) | ((buffer[last(field.data)] % Int) << 8)) + 1
     length(buffer) < block_size && return BGZFErrors.truncated_file
 
@@ -397,17 +409,16 @@ function compress_block!(
     @assert length(dst) ≥ MAX_BLOCK_SIZE
     GC.@preserve dst src begin
         # Note: This should never be able to error, so we typeassert here
+        src_memory = ReadableMemory(pointer(src), length(src))
         libdeflate_return = unsafe_compress!(
             compressor,
-            pointer(dst) + 18,
-            length(dst) - 18,
-            pointer(src),
-            length(src),
-        )::Int
-        crc32 = unsafe_crc32(pointer(src), length(src))
+            WriteableMemory(pointer(dst) + 18, length(dst) - 18),
+            src_memory,
+        )::UInt
+        crc32 = unsafe_crc32(src_memory)
     end
     # Header is 12 bytes. 6 bytes for the BC field. 8 bytes for CRC and decompressed size
-    block_size = 18 + 8 + libdeflate_return
+    block_size = 18 + 8 + libdeflate_return % Int
     # Copy header over, including first 4 bytes of BC field
     copyto!(dst, ImmutableMemoryView(BLOCK_HEADER))
     # Copy BC value over. Note that, if length(src) ≤ SAFE_DECOMPRESSED_SIZE, block_size

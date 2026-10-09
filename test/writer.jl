@@ -4,12 +4,121 @@ end
 
 import BufferIO
 
+@testset "Close twice" begin
+    io = VecWriter()
+    writer = BGZFWriter(io)
+    write(writer, "abc")
+    close(writer)
+    n_bytes = length(io.vec)
+    close(writer)
+    @test length(io.vec) == n_bytes
+    @test bgzfread(io) == b"abc"
+end
+
+@testset "No EOF block when function argument throws" begin
+    for n_workers in [1, 4]
+        test_no_eof_block_on_exception((f, io) -> BGZFWriter(f, io; n_workers))
+    end
+end
+
+@testset "Write after close throws" begin
+    writer = BGZFWriter(VecWriter())
+    write(writer, "abc")
+    close(writer)
+    @test isempty(get_buffer(writer))
+    @test_throws IOError write(writer, "hello")
+    @test_throws IOError write(writer, 0x01)
+end
+
+@testset "Close with failing flush closes underlying" begin
+    underlying = FailingFlushWriter()
+    writer = BGZFWriter(underlying)
+    write(writer, "abc")
+    @test_throws ErrorException close(writer)
+    @test !isopen(writer)
+    @test underlying.closed
+end
+
+@testset "shallow_flush returns number of uncompressed bytes" begin
+    for n_workers in [1, 4]
+        io = VecWriter()
+        writer = BGZFWriter(io; n_workers)
+        write(writer, "a"^1000)
+        @test shallow_flush(writer) == 1000
+        @test shallow_flush(writer) == 0
+        # More than fits in the writer's buffer, so some is shipped by `grow_buffer`
+        # before the call to `shallow_flush`
+        data = rand(UInt8, 300_000)
+        write(writer, data)
+        @test shallow_flush(writer) == 300_000 - 4 * BGZFLib.SAFE_DECOMPRESSED_SIZE
+        close(writer)
+        @test bgzfread(io) == vcat(codeunits("a"^1000), data)
+    end
+end
+
 mutable struct TinyWriter <: BufferIO.AbstractBufWriter
     buffer::Memory{UInt8}
 end
 
 BufferIO.get_buffer(io::TinyWriter) = MemoryView(io.buffer)
 BufferIO.grow_buffer(io::TinyWriter) = 0
+
+# Writer that can hold at most `limit` bytes, after which writing throws
+mutable struct LimitedWriter <: BufferIO.AbstractBufWriter
+    inner::VecWriter
+    limit::Int
+    closed::Bool
+end
+
+LimitedWriter(limit::Int) = LimitedWriter(VecWriter(), limit, false)
+
+function BufferIO.get_buffer(io::LimitedWriter)
+    buffer = get_buffer(io.inner)
+    return buffer[1:min(length(buffer), io.limit - length(io.inner.vec))]
+end
+
+function BufferIO.grow_buffer(io::LimitedWriter)
+    length(io.inner.vec) ≥ io.limit && return 0
+    return BufferIO.grow_buffer(io.inner)
+end
+
+BufferIO.consume(io::LimitedWriter, n::Int) = consume(io.inner, n)
+Base.close(io::LimitedWriter) = (io.closed = true; nothing)
+
+@testset "Failing underlying write sets error state" begin
+    underlying = LimitedWriter(100_000)
+    writer = BGZFWriter(underlying; n_workers = 2)
+    # Incompressible, so the compressed data does not fit in the underlying writer
+    write(writer, rand(UInt8, 300_000))
+    @test_throws IOError shallow_flush(writer)
+
+    err = try
+        shallow_flush(writer)
+        nothing
+    catch e
+        e
+    end
+    @test err isa BGZFError
+    @test err.type == BGZFErrors.operation_on_error
+    @test_throws BGZFError write_empty_block(writer)
+    @test isempty(get_buffer(writer))
+    @test_throws BGZFError write(writer, 0x01)
+
+    # Closing in the error state does not throw, and does not write more data
+    n_bytes = length(underlying.inner.vec)
+    close(writer)
+    @test !isopen(writer)
+    @test underlying.closed
+    @test length(underlying.inner.vec) == n_bytes
+end
+
+@testset "Failing underlying write in function argument constructor" begin
+    underlying = LimitedWriter(100_000)
+    @test_throws IOError BGZFWriter(underlying; n_workers = 2) do writer
+        write(writer, rand(UInt8, 300_000))
+    end
+    @test underlying.closed
+end
 
 @testset "From AbstractBufWriter" begin
     io = VecWriter()

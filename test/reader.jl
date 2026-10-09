@@ -74,6 +74,19 @@ end
     end
 end
 
+@testset "BGZFReader - eof with only empty blocks remaining" begin
+    for n_workers in [1, 4]
+        reader = BGZFReader(CursorReader(BGZFLib.EOF_BLOCK); n_workers)
+        @test eof(reader)
+        close(reader)
+
+        data = vcat(BGZFLib.EOF_BLOCK, BGZFLib.EOF_BLOCK)
+        reader = BGZFReader(CursorReader(data); n_workers)
+        @test eof(reader)
+        close(reader)
+    end
+end
+
 @testset "Seeking" begin
     @testset "seekstart" begin
         for n_workers in [1, 4]
@@ -82,14 +95,14 @@ end
             seekstart(reader)
             @test read(reader, 5) == b"Hello"
 
-            seek(reader, 0)
+            seek(reader, VirtualOffset(0, 0))
             @test read(reader, 13) == b"Hello, world!"
             close(reader)
         end
     end
 end
 
-@testset "BGZFReader - virtual_position and virtual_seek" begin
+@testset "BGZFReader - virtual_position and seek" begin
     for n_workers in [1, 4]
         reader = BGZFReader(CursorReader(gz1_data); n_workers)
 
@@ -128,7 +141,7 @@ end
             saved_vo = virtual_position(reader)
 
             read(reader, 10)
-            virtual_seek(reader, saved_vo)
+            seek(reader, saved_vo)
 
             @test virtual_position(reader) == saved_vo
             @test read(reader, 6) == b"world!"
@@ -136,7 +149,7 @@ end
 
         @testset "Virtual seek to beginning" begin
             read(reader, 20)
-            virtual_seek(reader, VirtualOffset(0, 0))
+            seek(reader, VirtualOffset(0, 0))
 
             @test virtual_position(reader) == VirtualOffset(0, 0)
             @test read(reader, 5) == b"Hello"
@@ -144,7 +157,7 @@ end
 
         @testset "Virtual seek within same block" begin
             seekstart(reader)
-            virtual_seek(reader, VirtualOffset(0, 7))
+            seek(reader, VirtualOffset(0, 7))
 
             @test read(reader, 6) == b"world!"
         end
@@ -156,17 +169,35 @@ end
             vo_second_block = virtual_position(reader)
 
             seekstart(reader)
-            virtual_seek(reader, vo_second_block)
+            seek(reader, vo_second_block)
 
             @test virtual_position(reader) == vo_second_block
         end
 
         @testset "Virtual seek out of bounds throws error" begin
             seekstart(reader)
-            @test_throws BGZFError virtual_seek(reader, VirtualOffset(0, 100))
+            @test_throws BGZFError seek(reader, VirtualOffset(0, 100))
         end
 
         close(reader)
+    end
+end
+
+@testset "BGZFReader - seek" begin
+    for n_workers in [1, 4]
+        test_seek_api(io -> BGZFReader(io; n_workers))
+    end
+end
+
+@testset "BGZFReader - out of bounds seek sets error state" begin
+    for n_workers in [1, 4]
+        test_seek_out_of_bounds(io -> BGZFReader(io; n_workers))
+    end
+end
+
+@testset "BGZFReader - virtual_position at EOF and after seek" begin
+    for n_workers in [1, 4]
+        test_virtual_position_eof((io; kw...) -> BGZFReader(io; n_workers, kw...))
     end
 end
 
@@ -185,7 +216,7 @@ end
             consume(reader, length(buf))
         end
         for vo in positions
-            virtual_seek(reader, vo)
+            seek(reader, vo)
             @test virtual_position(reader) == vo
         end
         close(reader)
@@ -209,6 +240,34 @@ end
         # Attempting to read one byte from malformed block errors.
         @test_throws BGZFError read(reader, UInt8)
 
+        close(reader)
+    end
+end
+
+@testset "Close in middle of block" begin
+    for n_workers in [1, 4]
+        reader = BGZFReader(CursorReader(gz1_data); n_workers)
+        read(reader, 3)
+        close(reader)
+        @test isempty(get_buffer(reader))
+        @test eof(reader)
+        @test read(reader) == UInt8[]
+    end
+end
+
+@testset "Parse error is last in result queue" begin
+    for n_workers in [1, 4]
+        data = append!(copy(gz1_data), b"bad data")
+        reader = BGZFReader(CursorReader(data); n_workers)
+        # How many blocks are queued per `fill_buffer` depends on the buffer pool,
+        # so read until the parse error has been queued.
+        for _ in 1:100
+            any(x -> x isa BGZFError, reader.result_queue) && break
+            consume(reader, length(get_buffer(reader)))
+            fill_buffer(reader)
+        end
+        @test last(reader.result_queue) isa BGZFError
+        @test_throws BGZFError read(reader)
         close(reader)
     end
 end
