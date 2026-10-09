@@ -160,7 +160,7 @@ end
 # It's more efficient to expose slightly less, such that if the user fills the exposed buffer,
 # it neatly fits in WRITER_BLOCKS number of blocks.
 function BufferIO.get_buffer(io::BGZFWriter)
-    return MemoryView(io.buffer)[(io.consumed + 1):(WRITER_BLOCKS * SAFE_DECOMPRESSED_SIZE)]
+    return @inbounds MemoryView(io.buffer)[(io.consumed + 1):(WRITER_BLOCKS * SAFE_DECOMPRESSED_SIZE)]
 end
 
 function BufferIO.consume(io::BGZFWriter, n::Int)

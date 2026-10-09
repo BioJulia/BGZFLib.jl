@@ -265,6 +265,26 @@ end
     @test read(reader, 10) == b"Hello, wor"
 end
 
+@testset "Seek within loaded block does not reread it" begin
+    reader = SyncBGZFReader(CursorReader(gz1_data))
+    first_block = first(gz1_content)
+    @test read(reader, length(first_block)) == first_block
+    underlying_pos = position(reader.io)
+
+    # Seeking back into the fully consumed first block reuses the decompressed data
+    seek(reader, VirtualOffset(0, 7))
+    @test position(reader.io) == underlying_pos
+    @test virtual_position(reader) == VirtualOffset(0, 7)
+    @test read(reader, 6) == b"world!"
+
+    # Out of bounds in the loaded block still errors, and seeking recovers
+    @test_throws BGZFError seek(reader, VirtualOffset(0, length(first_block) + 1))
+    @test_throws BGZFError read(reader, UInt8)
+    seek(reader, VirtualOffset(0, 0))
+    @test read(reader) == reduce(vcat, gz1_content)
+    close(reader)
+end
+
 @testset "Close in error state closes underlying" begin
     data = append!(copy(gz1_data), b"bad data")
     underlying = IOBuffer(data)

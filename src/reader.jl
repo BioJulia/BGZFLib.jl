@@ -200,7 +200,7 @@ function BGZFReader(
     return BGZFReader(bufio; n_workers, check_truncated)
 end
 
-BufferIO.get_buffer(io::BGZFReader) = ImmutableMemoryView(io.buffer)[(io.consumed + 1):io.filled]
+BufferIO.get_buffer(io::BGZFReader) = @inbounds ImmutableMemoryView(io.buffer)[(io.consumed + 1):io.filled]
 
 function BufferIO.consume(io::BGZFReader, n::Int)
     @boundscheck if n % UInt > (io.filled - io.consumed) % UInt
@@ -259,6 +259,15 @@ function seek_block(io::BGZFReader, offset::Int)
         end
     end
     empty!(io.result_queue)
+
+    # Recycle packages no worker has started on yet, so we don't wait for them
+    @lock io.sender while isready(io.sender)
+        package = take!(io.sender)
+        for work in package.block_works
+            push!(io.buffer_pool, unsafe_memory(work.source), work.destination)
+        end
+        io.n_buffers_received_or_skipped += length(package.block_works)
+    end
 
     # By incrementing these counters, all work currently in workers or channels
     # is invalidated and is ignored. That logic is in `take_package!`
@@ -423,7 +432,9 @@ function queue!(io::BGZFReader)
     while length(io.buffer_pool) ≥ 2 * BLOCKS_PER_PACKAGE
         # TODO: Annoying that we allocate this here even if EOF.
         block_works = ReaderBlockWork[]
-        for _ in 1:BLOCKS_PER_PACKAGE
+        # If the user is waiting for data (e.g. after seek), ship a single block first
+        starved = io.n_buffers_shipped_or_skipped == io.queue_n_removed_or_skipped
+        for _ in 1:(starved ? 1 : BLOCKS_PER_PACKAGE)
             block = get_reader_block_work(io)
             if block === nothing
                 # no block indicated EOF.

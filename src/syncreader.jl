@@ -137,9 +137,10 @@ or [`get_virtual_offset`](@ref).
 
 Seeking reads and decompresses the block at `vo.file_offset`. If that fails, e.g. because
 `vo.file_offset` is not the start of a BGZF block, the reader enters an error state and
-throws a `BGZFError`. If `vo.block_offset` is larger than the decompressed size of the block,
-the reader enters an error state and throws a `BGZFError` with
-`BGZFErrors.block_offset_out_of_bounds`.
+throws a `BGZFError`. As an optimization, a `SyncBGZFReader` does not reread the block if
+it is the block currently loaded.
+If `vo.block_offset` is larger than the decompressed size of the block, the reader enters
+an error state and throws a `BGZFError` with `BGZFErrors.block_offset_out_of_bounds`.
 Seeking resets a reader in an error state.
 
 The underlying IO must support `seek`. If seeking the underlying IO throws, the reader
@@ -183,14 +184,20 @@ julia> close(reader)
 """
 function Base.seek(io::SyncBGZFReader, vo::VirtualOffset)
     file_offset = vo.file_offset % Int
-    seek_block(io, file_offset)
-    # If the block at `file_offset` is empty, this skips to the next non-empty block,
-    # and the block offset applies to that block, like in htslib.
-    fill_buffer(io)
+    # If the target block is the one currently loaded, there is no need to read and
+    # decompress it again. A loaded block is never empty, since empty blocks are skipped,
+    # so `io.stop > 0` means a block is loaded.
+    is_loaded = io.state == STATE_OPEN && io.stop > 0 && io.current_block_offset == file_offset
+    if !is_loaded
+        seek_block(io, file_offset)
+        # If the block at `file_offset` is empty, this skips to the next non-empty block,
+        # and the block offset applies to that block, like in htslib.
+        fill_buffer(io)
+    end
     if io.stop < vo.block_offset
         throw_error(io, BGZFError(file_offset, BGZFErrors.block_offset_out_of_bounds))
     end
-    io.start += vo.block_offset
+    io.start = vo.block_offset + 1
     return io
 end
 

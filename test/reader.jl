@@ -259,7 +259,13 @@ end
     for n_workers in [1, 4]
         data = append!(copy(gz1_data), b"bad data")
         reader = BGZFReader(CursorReader(data); n_workers)
-        fill_buffer(reader)
+        # How many blocks are queued per `fill_buffer` depends on the buffer pool,
+        # so read until the parse error has been queued.
+        for _ in 1:100
+            any(x -> x isa BGZFError, reader.result_queue) && break
+            consume(reader, length(get_buffer(reader)))
+            fill_buffer(reader)
+        end
         @test last(reader.result_queue) isa BGZFError
         @test_throws BGZFError read(reader)
         close(reader)

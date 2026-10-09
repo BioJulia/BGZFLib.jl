@@ -67,7 +67,7 @@ function Base.show(io::IO, reader::SyncBGZFWriter)
     return print(io, ')')
 end
 
-BufferIO.get_buffer(io::SyncBGZFWriter) = MemoryView(io.buffer)[(io.n_filled + 1):end]
+BufferIO.get_buffer(io::SyncBGZFWriter) = @inbounds MemoryView(io.buffer)[(io.n_filled + 1):end]
 BufferIO.get_unflushed(io::SyncBGZFWriter) = MemoryView(io.buffer)[1:io.n_filled]
 
 function BufferIO.consume(io::SyncBGZFWriter, n::Int)
