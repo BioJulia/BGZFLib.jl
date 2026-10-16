@@ -30,24 +30,18 @@ This is modeled by the `VirtualOffset`:
 VirtualOffset
 ```
 
-The current `VirtualOffset` position is obtained with `virtual_position`, and seeking is done with `virtual_seek`:
+The current `VirtualOffset` position is obtained with `virtual_position`, and seeking is done with `Base.seek`:
 
 ```@docs; canonical = false
 virtual_position
-virtual_seek
-```
-
-BGZF readers also supports `Base.seek`. Calling `seek(io, x)` is equivalent to `virtual_seek(io, VirtualOffset(x, 0))`:
-
-```@docs; canonical = false
-Base.seek(::SyncBGZFReader, ::Int)
+Base.seek(::SyncBGZFReader, ::VirtualOffset)
 ```
 
 ### Seeking with `GZIndex`
 In order to seek to a certain *decompressed offset*, e.g. to seek to the 10,000th byte in a decompressed stream, you need to know the offset of the BGZF block that contains this byte in the *compressed stream*.
 This can be efficiently obtained with a `GZIndex`.
 
-An `index::GZIndex` value contains the (public) property `index.blocks`, which is a `Vector{@NamedTuple{compressed_offset::UInt64, decompressed_offset::UInt64}}`, with one element for each block in the corresponding file. All the values of `compressed_offset` and `decompressed_offset` are guaranteed to be sorted in ascending order in a `GZIndex`:
+An `index::GZIndex` value contains the (public) property `index.blocks`, which is a `Vector{@NamedTuple{compressed_offset::UInt64, decompressed_offset::UInt64}}`, with one element for each non-empty block in the corresponding file, except that the first element is always `(0, 0)`, like in htslib's GZI files. All the values of `compressed_offset` and `decompressed_offset` are guaranteed to be sorted in ascending order in a `GZIndex`:
 
 ```@docs; canonical = false
 GZIndex

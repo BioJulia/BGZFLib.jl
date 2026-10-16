@@ -14,7 +14,7 @@ struct WriterResult
     work_index::Int
     # The unused buffer is always just recycled to the buffer pool
     unused::Memory{UInt8}
-    # Eiher an error, and a buffer that can be recycled. Else, a view that should
+    # Either an error, and a buffer that can be recycled. Else, a view that should
     # be written to the underlying IO, after which it can be recycled.
     result::ImmutableMemoryView{UInt8}
 end
@@ -23,7 +23,7 @@ end
     BGZFWriter(io::T <: AbstractBufWriter; kwargs)::BGZFWriter{T}
     BGZFWriter(io::T <: IO; kwargs)::BGZFWriter{BufWriter{T}}
 
-Create a `SyncBGZFWriter <: AbstractBufWriter` that writes compresses data written to it,
+Create a `BGZFWriter <: AbstractBufWriter` that compresses data written to it,
 and writes the compressed BGZF file to the underlying `io`.
 
 This type differs from `SyncBGZFWriter` in that the compression happens in separate worker tasks.
@@ -33,12 +33,20 @@ threads.
 If `io::AbstractBufWriter`, `io` must be able to buffer up to 2^16 bytes, else a
 `BGZFError(nothing, BGZFErrors.insufficient_writer_space)` is thrown.
 
+If writing to `io` throws, the writer enters an error state, and further flushing or
+writing throws a `BGZFError(nothing, BGZFErrors.operation_on_error)`. A writer in the
+error state cannot be recovered, but should still be closed to release its resources.
+
 The keyword arguments are:
 * `n_workers::Int`: Set number of workers. Must be > 0. Defaults to some small number.
 * `compress_level::Int`: Set compression level from 1 to 12, with 12 being slowest but with
   the best compression ratio. It defaults to an intermediate level of compression.
-* `append_empty::Bool = true`. If set, closing the `SyncBGZFWriter` will write an empty BGZF block,
+* `append_empty::Bool = true`. If set, closing the `BGZFWriter` will write an empty BGZF block,
   indicating EOF.
+
+`BGZFWriter(f, io; kwargs...)` creates the writer, calls `f` on it, then closes it.
+If `f` throws, the empty EOF block is not written, so that readers can detect
+the output is incomplete.
 """
 mutable struct BGZFWriter{T <: AbstractBufWriter} <: AbstractBufWriter
     const io::T
@@ -73,7 +81,7 @@ mutable struct BGZFWriter{T <: AbstractBufWriter} <: AbstractBufWriter
     # e.g. if R result have been removed, then result number N is at index N - R.
     n_removed::Int
 
-    # Write EOF block when closing the reader?
+    # Write EOF block when closing the writer?
     append_empty::Bool
     state::UInt8
 end
@@ -130,6 +138,10 @@ function BGZFWriter(f, io::Union{AbstractBufWriter, IO}; kwargs...)
     writer = BGZFWriter(io; kwargs...)
     return try
         f(writer)
+    catch
+        # Don't mark the output as complete if `f` failed
+        writer.append_empty = false
+        rethrow()
     finally
         close(writer)
     end
@@ -139,7 +151,7 @@ Base.isopen(io::BGZFWriter) = io.state != STATE_CLOSED
 
 function write_empty_block(io::BGZFWriter)
     shallow_flush(io)
-    write(io.io, EOF_BLOCK)
+    write_underlying(io, ImmutableMemoryView(EOF_BLOCK))
     return nothing
 end
 
@@ -148,7 +160,7 @@ end
 # It's more efficient to expose slightly less, such that if the user fills the exposed buffer,
 # it neatly fits in WRITER_BLOCKS number of blocks.
 function BufferIO.get_buffer(io::BGZFWriter)
-    return MemoryView(io.buffer)[(io.consumed + 1):(WRITER_BLOCKS * SAFE_DECOMPRESSED_SIZE)]
+    return @inbounds MemoryView(io.buffer)[(io.consumed + 1):(WRITER_BLOCKS * SAFE_DECOMPRESSED_SIZE)]
 end
 
 function BufferIO.consume(io::BGZFWriter, n::Int)
@@ -160,21 +172,41 @@ function BufferIO.consume(io::BGZFWriter, n::Int)
 end
 
 function check_open(io::BGZFWriter)
-    return isopen(io) || throw(IOError(IOErrorKinds.ClosedIO))
+    io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
+    io.state == STATE_ERROR && throw(BGZFError(nothing, BGZFErrors.operation_on_error))
+    return nothing
 end
 
-# Not the same as BufferIO.shallow_flush, because we don't return
-# the number of flushed bytes. I guess we could.
-function BufferIO.shallow_flush(io::BGZFWriter)
+# Make `get_buffer` return an empty buffer, so that writing calls `grow_buffer`,
+# which throws if the writer is closed or in an error state.
+function disable_buffer!(io::BGZFWriter)
+    io.consumed = WRITER_BLOCKS * SAFE_DECOMPRESSED_SIZE
+    return nothing
+end
+
+# If writing to the underlying IO fails, an unknown amount of the data may have been
+# written, so the output can't be recovered. We set the error state so the writer
+# can't silently continue writing a corrupt file.
+function write_underlying(io::BGZFWriter, data::ImmutableMemoryView{UInt8})
+    return try
+        write(io.io, data)
+    catch
+        io.state = STATE_ERROR
+        disable_buffer!(io)
+        rethrow()
+    end
+end
+
+function BufferIO.shallow_flush(io::BGZFWriter)::Int
     # grow_buffer will ship all data in the current buffer, if any.
-    n_flushed = _grow_buffer(io).n_flushed
+    n_flushed = grow_buffer(io)
     # With no data in the buffer, we first need to wait for all shipped
-    # data to be received, thius ensuring workers are done.
+    # data to be received, thus ensuring workers are done.
     while io.n_received < io.n_shipped
         take_result(io)
     end
     # Now, all results should be in the queue. So, we flush it.
-    n_flushed += flush_next_result_queue(io)
+    flush_next_result_queue(io)
     # It must be empty now, since we made sure to wait for all data
     # from the workers.
     @assert isempty(io.result_queue)
@@ -189,26 +221,32 @@ end
 
 function Base.close(io::BGZFWriter)
     io.state == STATE_CLOSED && return nothing
-    shallow_flush(io)
-    if io.append_empty
-        write(io.io, EOF_BLOCK)
+    try
+        # In the error state, the error has already been thrown, and the output is corrupt.
+        # So, we only release resources. Throwing here would also mask the original error
+        # if `close` is called in a `finally` block.
+        if io.state != STATE_ERROR
+            shallow_flush(io)
+            io.append_empty && write(io.io, EOF_BLOCK)
+            flush(io.io)
+        end
+    finally
+        io.state = STATE_CLOSED
+        disable_buffer!(io)
+        empty!(io.buffer_pool)
+        empty!(io.result_queue)
+        # Closing the sender terminates the worker loops. We don't close the receiver,
+        # because if the flush above failed, workers may still be compressing,
+        # and closing the receiver would make their `put!` throw.
+        close(io.sender)
+        close(io.io)
     end
-    close(io.receiver)
-    close(io.sender)
-    flush(io.io)
-    close(io.io)
-    io.state = STATE_CLOSED
     return nothing
 end
 
-BufferIO.grow_buffer(io::BGZFWriter) = _grow_buffer(io).grown
-
-function _grow_buffer(io::BGZFWriter)::@NamedTuple{n_flushed::Int, grown::Int}
+function BufferIO.grow_buffer(io::BGZFWriter)::Int
     check_open(io)
-
-    n_flushed = 0
-
-    iszero(io.consumed) && return (; n_flushed, grown = 0)
+    iszero(io.consumed) && return 0
 
     while true
         # Take available, finished work from receiver. This frees up buffers
@@ -222,7 +260,7 @@ function _grow_buffer(io::BGZFWriter)::@NamedTuple{n_flushed::Int, grown::Int}
         end
 
         # Flush all ready work to underlying IO, potentially freeing up more buffers
-        n_flushed += flush_next_result_queue(io)
+        flush_next_result_queue(io)
 
         # We need two buffers to continue: One to replace the one we send to compression,
         # and one to store the compressed data.
@@ -247,7 +285,7 @@ function _grow_buffer(io::BGZFWriter)::@NamedTuple{n_flushed::Int, grown::Int}
         io.buffer = pop!(io.buffer_pool)
         old_consumed = io.consumed
         io.consumed = 0
-        return (; n_flushed, grown = old_consumed)
+        return old_consumed
     end
     return unreachable()
 end
@@ -276,16 +314,15 @@ end
 
 # Flush results from queue until we hit a `nothing`, indicating the next result
 # has not yet been received.
-# Return number of flushed bytes.
-function flush_next_result_queue(io::BGZFWriter)::Int
-    n_flushed = 0
+function flush_next_result_queue(io::BGZFWriter)
     while !isempty(io.result_queue) && !isnothing(first(io.result_queue))
-        fst = something(popfirst!(io.result_queue)) # we just checked for is nothing
+        fst = something(first(io.result_queue)) # we just checked for is nothing
+        write_underlying(io, fst)
+        popfirst!(io.result_queue)
         io.n_removed += 1
-        n_flushed += write(io.io, fst)
         push!(io.buffer_pool, unsafe_memory(fst))
     end
-    return n_flushed
+    return nothing
 end
 
 function writer_worker_loop(
@@ -293,7 +330,7 @@ function writer_worker_loop(
         result_channel::Channel{WriterResult},
         compress_level::Int,
     )
-    compressor = Compressor(compress_level)
+    compressor = Compressor(compress_level % UInt8)
     for work in work_channel
         n_written = 0
         @assert length(work.uncompressed) ≤ WRITER_BLOCKS * SAFE_DECOMPRESSED_SIZE
