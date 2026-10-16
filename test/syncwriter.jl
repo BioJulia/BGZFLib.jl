@@ -100,7 +100,7 @@ end
 @testset "Function argument constructor" begin
     io = VecWriter()
 
-    result = SyncBGZFWriter(io; append_empty = true, compresslevel = 6) do writer
+    result = SyncBGZFWriter(io; append_empty = true, compress_level = 6) do writer
         @test isopen(writer)
         @test write(writer, b"Hello, ") == 7
         @test write(writer, b"world!") == 6
@@ -110,6 +110,57 @@ end
     reader = SyncBGZFReader(CursorReader(io.vec); check_truncated = true)
     @test read(reader) == b"Hello, world!"
     close(reader)
+end
+
+@testset "Close twice" begin
+    io = VecWriter()
+    writer = SyncBGZFWriter(io)
+    write(writer, "abc")
+    close(writer)
+    @test !isopen(writer)
+    n_bytes = length(io.vec)
+    close(writer)
+    @test length(io.vec) == n_bytes
+end
+
+@testset "No EOF block when function argument throws" begin
+    test_no_eof_block_on_exception(SyncBGZFWriter)
+end
+
+@testset "Write after close throws" begin
+    writer = SyncBGZFWriter(VecWriter())
+    write(writer, "abc")
+    close(writer)
+    @test isempty(get_buffer(writer))
+    @test isempty(BufferIO.get_unflushed(writer))
+    @test_throws IOError write(writer, "hello")
+    @test_throws IOError write(writer, 0x01)
+end
+
+@testset "Close inside function argument constructor" begin
+    io = VecWriter()
+    SyncBGZFWriter(io) do writer
+        write(writer, "abc")
+        close(writer)
+    end
+    @test SyncBGZFReader(read, CursorReader(io.vec)) == b"abc"
+end
+
+@testset "Close with failing flush closes underlying" begin
+    underlying = FailingFlushWriter()
+    writer = SyncBGZFWriter(underlying)
+    write(writer, "abc")
+    @test_throws ErrorException close(writer)
+    @test !isopen(writer)
+    @test underlying.closed
+end
+
+@testset "shallow_flush returns number of uncompressed bytes" begin
+    writer = SyncBGZFWriter(VecWriter())
+    write(writer, "a"^1000)
+    @test shallow_flush(writer) == 1000
+    @test shallow_flush(writer) == 0
+    close(writer)
 end
 
 @testset "show" begin
