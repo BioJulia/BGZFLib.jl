@@ -28,7 +28,7 @@ makedocs(;
         "Seeking" => "gzindex.md",
         "Reference" => "reference.md",
     ],
-    authors = "Jakob Nybo Nissen",
+    authors = "Jakob Nybo Andersen",
     checkdocs = :public,
     remotes = nothing,
 )

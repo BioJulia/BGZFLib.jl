@@ -76,22 +76,18 @@ function write_gzi(io::Union{AbstractBufWriter, IO}, index::GZIndex)
     blocks = index.blocks
     # The first block is always at (0, 0) and is implicit in GZI files
     n_written = length(blocks) - 1
-    write(io, htol(n_written % UInt64))
-    if ENDIAN_BOM == 0x04030201
-        # On little-endian CPUs, the memory layout of `blocks` is the GZI format
-        if !iszero(n_written)
-            GC.@preserve blocks begin
-                p = Ptr{UInt8}(pointer(blocks, 2))
-                unsafe_write(io, p, (16 * n_written) % UInt)
-            end
-        end
-    else
-        for i in 2:lastindex(blocks)
-            (; compressed_offset, decompressed_offset) = blocks[i]
-            write(io, htol(compressed_offset), htol(decompressed_offset))
-        end
+    # Serialize to a byte vector first, since BufferIO writers can only write bytes
+    bytes = Vector{UInt8}(undef, 8 + 16 * n_written)
+    mem = MemoryView(bytes)
+    unsafe_bitstore!(n_written % UInt64, mem, 1)
+    for i in 2:lastindex(blocks)
+        (; compressed_offset, decompressed_offset) = blocks[i]
+        p = 16 * (i - 2) + 9
+        unsafe_bitstore!(compressed_offset, mem, p)
+        unsafe_bitstore!(decompressed_offset, mem, p + 8)
     end
-    return 8 + 16 * n_written
+    write(io, bytes)
+    return length(bytes)
 end
 
 function get_buffer_with_length(io::AbstractBufReader, len::Int)::Union{Nothing, ImmutableMemoryView{UInt8}}
@@ -179,15 +175,14 @@ function load_gzi(io::AbstractBufReader)
     # The first block at (0, 0) is implicit in GZI files
     blocks = Vector{IndexBlock}(undef, len + 1)
     blocks[1] = (; compressed_offset = UInt64(0), decompressed_offset = UInt64(0))
-    total_bytes = 16 * len
-    # Julia guarantees the memory layout of bitstypes so this will work.
-    GC.@preserve blocks begin
-        n_read = unsafe_read(io, Ptr{UInt8}(pointer(blocks, 2)), total_bytes % UInt)
-    end
-    n_read == total_bytes || throw(IOError(IOErrorKinds.EOF))
-    for i in 2:lastindex(blocks)
-        (; compressed_offset, decompressed_offset) = blocks[i]
-        blocks[i] = (; compressed_offset = ltoh(compressed_offset), decompressed_offset = ltoh(decompressed_offset))
+    bytes = Memory{UInt8}(undef, 16 * len)
+    read_all!(io, MemoryView(bytes)) == length(bytes) || throw(IOError(IOErrorKinds.EOF))
+    view = ImmutableMemoryView(bytes)
+    for i in 1:len
+        p = 16 * (i - 1) + 1
+        compressed_offset = unsafe_bitload(UInt64, view, p)
+        decompressed_offset = unsafe_bitload(UInt64, view, p + 8)
+        blocks[i + 1] = (; compressed_offset, decompressed_offset)
     end
     if len > 0 && blocks[2] == blocks[1]
         popfirst!(blocks)

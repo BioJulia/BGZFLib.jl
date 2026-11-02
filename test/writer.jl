@@ -62,6 +62,7 @@ end
 
 BufferIO.get_buffer(io::TinyWriter) = MemoryView(io.buffer)
 BufferIO.grow_buffer(io::TinyWriter) = 0
+Base.isopen(::TinyWriter) = true
 
 # Writer that can hold at most `limit` bytes, after which writing throws
 mutable struct LimitedWriter <: BufferIO.AbstractBufWriter
@@ -84,6 +85,7 @@ end
 
 BufferIO.consume(io::LimitedWriter, n::Int) = consume(io.inner, n)
 Base.close(io::LimitedWriter) = (io.closed = true; nothing)
+Base.isopen(io::LimitedWriter) = !io.closed
 
 @testset "Failing underlying write sets error state" begin
     underlying = LimitedWriter(100_000)
