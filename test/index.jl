@@ -246,12 +246,11 @@ end
 end
 
 function gzi_bytes(entries)
-    io = VecWriter()
-    write(io, htol(UInt64(length(entries))))
+    values = UInt64[length(entries)]
     for (co, dco) in entries
-        write(io, htol(UInt64(co)), htol(UInt64(dco)))
+        push!(values, co, dco)
     end
-    return io.vec
+    return collect(reinterpret(UInt8, htol.(values)))
 end
 
 @testset "htslib GZI compatibility" begin

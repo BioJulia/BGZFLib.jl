@@ -26,7 +26,8 @@ using BufferIO: BufferIO,
     grow_buffer,
     shallow_flush,
     get_unflushed,
-    consume
+    consume,
+    read_all!
 
 export BGZFReader,
     BGZFWriter,

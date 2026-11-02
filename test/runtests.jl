@@ -36,6 +36,7 @@ BufferIO.grow_buffer(io::FailingFlushWriter) = BufferIO.grow_buffer(io.inner)
 BufferIO.consume(io::FailingFlushWriter, n::Int) = consume(io.inner, n)
 Base.flush(::FailingFlushWriter) = error("flush failed")
 Base.close(io::FailingFlushWriter) = (io.closed = true; nothing)
+Base.isopen(io::FailingFlushWriter) = !io.closed
 
 # `make_reader(io; check_truncated)` constructs a BGZF reader
 function test_virtual_position_eof(make_reader)
@@ -222,6 +223,7 @@ end
 
 TrickleReader(data::Vector{UInt8}) = TrickleReader(data, 0, 0)
 Base.close(::TrickleReader) = nothing
+Base.isopen(::TrickleReader) = true
 
 function BufferIO.get_buffer(io::TrickleReader)
     return ImmutableMemoryView(io.data)[(io.n_consumed + 1):(io.n_consumed + io.n_buffered)]
