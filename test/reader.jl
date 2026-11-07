@@ -390,3 +390,35 @@ end
         close(reader)
     end
 end
+
+@testset "take_inner" begin
+    cursor = CursorReader(gz1_data)
+    reader = BGZFReader(cursor; n_workers = 2)
+    @test read(reader, 5) == gz1_content[1][1:5]
+    @test take_inner(reader) === cursor
+    @test !isopen(reader)
+    @test isopen(cursor)
+    @test isempty(get_buffer(reader))
+    @test_throws IOError seekstart(reader)
+
+    close(reader)
+    @test isopen(cursor)
+
+    @test_throws IOError take_inner(reader)
+end
+
+@testset "take_inner from IO returns the BufReader" begin
+    reader = BGZFReader(IOBuffer(gz1_data); n_workers = 2)
+    inner = take_inner(reader)
+    @test inner isa BufReader{IOBuffer}
+    @test isopen(inner)
+    close(inner)
+end
+
+@testset "take_inner in error state" begin
+    cursor = CursorReader(append!(copy(gz1_data), b"bad data"))
+    reader = BGZFReader(cursor; n_workers = 2)
+    @test_throws BGZFError read(reader)
+    @test take_inner(reader) === cursor
+    @test !isopen(reader)
+end

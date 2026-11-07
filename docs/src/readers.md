@@ -91,6 +91,9 @@ SyncBGZFReader(io -> String(read(io)), CursorReader(bgzf_data))
 "Hello, world!more dataxthen some moremore content herethis is another block"
 ```
 
+To stop using a reader without closing the IO it wraps, use `take_inner` from BufferIO instead of `close`.
+It closes the reader and returns the wrapped IO.
+
 ## Errors and error recovery
 Types in this package generally throw `BGZFError`s:
 
@@ -144,4 +147,8 @@ Hello, world!
 ```@docs; canonical=false
 BGZFReader
 SyncBGZFReader
+```
+
+```@docs
+BGZFLib.BufferIO.take_inner(::SyncBGZFReader)
 ```

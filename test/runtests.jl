@@ -1,7 +1,7 @@
 using BGZFLib
 using Test
 using MemoryViews
-using BufferIO: consume, fill_buffer, get_buffer, CursorReader, BufReader, IOError, VecWriter, BufWriter, shallow_flush
+using BufferIO: consume, fill_buffer, get_buffer, CursorReader, BufReader, IOError, VecWriter, BufWriter, shallow_flush, take_inner
 
 DIR = joinpath(dirname(dirname(pathof(BGZFLib))), "data")
 
@@ -22,6 +22,30 @@ gz1_content = [
 ] |> filter(!isempty)
 
 import BufferIO
+
+# Writer that can hold at most `limit` bytes, after which writing throws
+mutable struct LimitedWriter <: BufferIO.AbstractBufWriter
+    inner::VecWriter
+    limit::Int
+    closed::Bool
+end
+
+LimitedWriter(limit::Int) = LimitedWriter(VecWriter(), limit, false)
+
+function BufferIO.get_buffer(io::LimitedWriter)
+    buffer = get_buffer(io.inner)
+    return buffer[1:min(length(buffer), io.limit - length(io.inner.vec))]
+end
+
+function BufferIO.grow_buffer(io::LimitedWriter)
+    # The exposed buffer can't grow past the limit, no matter the size of the inner buffer
+    length(get_buffer(io)) ≥ io.limit - length(io.inner.vec) && return 0
+    return BufferIO.grow_buffer(io.inner)
+end
+
+BufferIO.consume(io::LimitedWriter, n::Int) = consume(io.inner, n)
+Base.close(io::LimitedWriter) = (io.closed = true; nothing)
+Base.isopen(io::LimitedWriter) = !io.closed
 
 # Writer whose `flush` throws, used to test that closing a BGZF writer
 # still closes the underlying IO when flushing fails.

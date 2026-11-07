@@ -211,8 +211,9 @@ function BufferIO.consume(io::BGZFReader, n::Int)
     return nothing
 end
 
-function Base.close(io::BGZFReader)
-    io.state == STATE_CLOSED && return nothing
+# Stop the workers and mark the reader as closed, without touching the underlying IO.
+# This is safe with blocks in flight, because workers only access their own buffers.
+function release_resources!(io::BGZFReader)
     # Closing the sender terminates the worker loops: a worker only ever blocks on
     # taking from the sender, since the receiver is unbounded so `put!` never blocks.
     # A worker mid-block finishes, puts its result onto the still-open receiver, then
@@ -228,9 +229,21 @@ function Base.close(io::BGZFReader)
     io.consumed = 0
     io.filled = 0
     io.underlying_is_eof_or_malformed = true
-    close(io.io)
     io.state = STATE_CLOSED
     return nothing
+end
+
+function Base.close(io::BGZFReader)
+    io.state == STATE_CLOSED && return nothing
+    release_resources!(io)
+    close(io.io)
+    return nothing
+end
+
+function BufferIO.take_inner(io::BGZFReader)
+    io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
+    release_resources!(io)
+    return io.io
 end
 
 Base.isopen(io::BGZFReader) = io.state != STATE_CLOSED

@@ -59,8 +59,15 @@ end
 "Hello, world!"
 ```
 
+To stop using a writer without closing the IO it wraps, use `take_inner` from BufferIO instead of `close`.
+This is needed for e.g. an `IOBuffer`, whose content is lost when it is closed.
+
 ## Reference
 ```@docs; canonical=false
 BGZFWriter
 SyncBGZFWriter
+```
+
+```@docs
+BGZFLib.BufferIO.take_inner(::SyncBGZFWriter)
 ```
