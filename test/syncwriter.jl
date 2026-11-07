@@ -170,3 +170,73 @@ end
     show(buf, writer)
     @test !isempty(take!(buf))
 end
+
+@testset "take_inner" begin
+    io = VecWriter()
+    writer = SyncBGZFWriter(io)
+    write(writer, "Hello")
+    @test take_inner(writer) === io
+    @test !isopen(writer)
+    @test isopen(io)
+    @test_throws IOError write(writer, 0x01)
+
+    # Includes the EOF block, so the output is not truncated
+    @test SyncBGZFReader(r -> read(r, String), CursorReader(io.vec)) == "Hello"
+
+    n_bytes = length(io.vec)
+    close(writer)
+    @test isopen(io)
+    @test length(io.vec) == n_bytes
+
+    @test_throws IOError take_inner(writer)
+end
+
+@testset "take_inner respects append_empty" begin
+    io = VecWriter()
+    writer = SyncBGZFWriter(io; append_empty = false)
+    write(writer, "Hello")
+    take_inner(writer)
+    @test SyncBGZFReader(r -> read(r, String), CursorReader(io.vec); check_truncated = false) == "Hello"
+    @test_throws BGZFError SyncBGZFReader(read, CursorReader(io.vec))
+end
+
+@testset "take_inner does not flush the inner IO" begin
+    underlying = FailingFlushWriter()
+    writer = SyncBGZFWriter(underlying)
+    @test take_inner(writer) === underlying
+    @test !underlying.closed
+end
+
+@testset "take_inner preserves an IOBuffer" begin
+    buffer = IOBuffer()
+    writer = SyncBGZFWriter(buffer)
+    write(writer, "Hello")
+    inner = take_inner(writer)
+    @test inner isa BufWriter{IOBuffer}
+    @test take_inner(inner) === buffer
+    @test SyncBGZFReader(r -> read(r, String), CursorReader(take!(buffer))) == "Hello"
+end
+
+@testset "take_inner with force after failed write" begin
+    underlying = LimitedWriter(100_000)
+    writer = SyncBGZFWriter(underlying)
+    # Incompressible, so the compressed data does not fit in the underlying writer
+    @test_throws BGZFError write(writer, rand(UInt8, 300_000))
+    @test_throws BGZFError take_inner(writer)
+    @test isopen(writer)
+
+    n_bytes = length(underlying.inner.vec)
+    @test take_inner(writer; force = true) === underlying
+    @test !isopen(writer)
+    @test !underlying.closed
+    @test length(underlying.inner.vec) == n_bytes
+end
+
+@testset "take_inner with force discards data" begin
+    io = VecWriter()
+    writer = SyncBGZFWriter(io)
+    write(writer, "Hello")
+    @test take_inner(writer; force = true) === io
+    @test isempty(io.vec)
+    @test_throws IOError take_inner(writer; force = true)
+end

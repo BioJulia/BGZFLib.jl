@@ -1,6 +1,6 @@
 name = "BGZFLib"
 uuid = "b86bd9b6-aa64-492d-a0e2-e61a004d8aed"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Jakob Nybo Andersen <jnandersen@proton.me>"]
 
 [deps]
@@ -9,7 +9,7 @@ LibDeflate = "9255714d-24a7-4b30-8ea3-d46a97f7e13b"
 MemoryViews = "a791c907-b98b-4e44-8f4d-e4c2362c6b2f"
 
 [compat]
-BufferIO = "0.2.6, 0.3"
+BufferIO = "0.2.7, 0.3"
 LibDeflate = "1"
 MemoryViews = "0.5"
 Test = "1.11"

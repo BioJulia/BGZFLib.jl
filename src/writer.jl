@@ -219,6 +219,21 @@ function Base.flush(io::BGZFWriter)
     return nothing
 end
 
+# Stop the workers and mark the writer as closed, without touching the underlying IO
+function release_resources!(io::BGZFWriter)
+    io.state = STATE_CLOSED
+    disable_buffer!(io)
+    empty!(io.buffer_pool)
+    empty!(io.result_queue)
+    # Closing the sender terminates the worker loops. We don't close the receiver,
+    # because if a flush failed, workers may still be compressing, and closing
+    # the receiver would make their `put!` throw.
+    close(io.sender)
+    # Queued work can only remain if the output was abandoned, so don't compress it
+    empty!(io.sender)
+    return nothing
+end
+
 function Base.close(io::BGZFWriter)
     io.state == STATE_CLOSED && return nothing
     try
@@ -231,17 +246,21 @@ function Base.close(io::BGZFWriter)
             flush(io.io)
         end
     finally
-        io.state = STATE_CLOSED
-        disable_buffer!(io)
-        empty!(io.buffer_pool)
-        empty!(io.result_queue)
-        # Closing the sender terminates the worker loops. We don't close the receiver,
-        # because if the flush above failed, workers may still be compressing,
-        # and closing the receiver would make their `put!` throw.
-        close(io.sender)
+        release_resources!(io)
         close(io.io)
     end
     return nothing
+end
+
+function BufferIO.take_inner(io::BGZFWriter; force::Bool = false)
+    if force
+        io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
+    else
+        shallow_flush(io) # throws if closed or in an error state
+        io.append_empty && write_underlying(io, ImmutableMemoryView(EOF_BLOCK))
+    end
+    release_resources!(io)
+    return io.io
 end
 
 function BufferIO.grow_buffer(io::BGZFWriter)::Int

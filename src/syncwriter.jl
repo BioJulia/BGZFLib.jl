@@ -88,6 +88,14 @@ function BufferIO.grow_buffer(io::SyncBGZFWriter)::Int
     return compress_and_flush_buffer(io)
 end
 
+# Mark the writer as closed, without touching the underlying IO
+function release_resources!(io::SyncBGZFWriter)
+    io.compressor = nothing
+    io.buffer = DUMMY_BUFFER
+    io.n_filled = 0
+    return nothing
+end
+
 function Base.close(io::SyncBGZFWriter)
     isopen(io) || return nothing
     try
@@ -95,12 +103,61 @@ function Base.close(io::SyncBGZFWriter)
         io.append_empty && write(io.io, EOF_BLOCK)
         flush(io.io)
     finally
-        io.compressor = nothing
-        io.buffer = DUMMY_BUFFER
-        io.n_filled = 0
+        release_resources!(io)
         close(io.io)
     end
     return nothing
+end
+
+"""
+    take_inner(io::Union{SyncBGZFWriter{T}, BGZFWriter{T}}; force::Bool = false)::T
+
+Write all buffered data of `io` to its wrapped `T`, then close `io` and return the
+wrapped `T`. The wrapped `T` is neither closed nor flushed.
+
+As when closing `io`, an empty EOF block is written if `io` was created with
+`append_empty = true`. To continue writing BGZF blocks to the
+wrapped IO, create the writer with `append_empty = false`.
+
+Throw an `IOError` of kind `ClosedIO` if `io` is already closed.
+If writing to the wrapped IO fails, or if `io` is a `BGZFWriter` in an error state,
+this function throws, and `io` is not closed. It can then still be closed with `close`,
+or the wrapped IO can be recovered with `force = true`.
+
+If `force` is `true`, `io` is closed and the wrapped IO is returned without writing
+anything to it, even if `io` is in an error state. All data not yet written to the wrapped
+IO is discarded, and no EOF block is written. The output in the wrapped IO is therefore
+likely incomplete, and it may end in a partially written block.
+An `IOError` of kind `ClosedIO` is still thrown if `io` is already closed.
+
+# Examples
+```jldoctest
+julia> buffer = IOBuffer();
+
+julia> writer = SyncBGZFWriter(buffer);
+
+julia> write(writer, "Hello");
+
+julia> inner = take_inner(writer); # a BufWriter{IOBuffer}
+
+julia> take_inner(inner) === buffer
+true
+
+julia> SyncBGZFReader(CursorReader(take!(buffer))) do reader
+           read(reader, String)
+       end
+"Hello"
+```
+"""
+function BufferIO.take_inner(io::SyncBGZFWriter; force::Bool = false)
+    if force
+        check_open(io)
+    else
+        shallow_flush(io) # throws if closed
+        io.append_empty && write(io.io, EOF_BLOCK)
+    end
+    release_resources!(io)
+    return io.io
 end
 
 Base.isopen(io::SyncBGZFWriter) = io.compressor !== nothing

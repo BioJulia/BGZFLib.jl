@@ -1,3 +1,13 @@
+# 0.2.2
+## New features
+* Implement `BufferIO.take_inner` for `BGZFReader`, `SyncBGZFReader`, `BGZFWriter`
+  and `SyncBGZFWriter`, which closes the reader or writer without closing the wrapped IO.
+  The writers take a `force` keyword to recover the wrapped IO after a failed write.
+* Require at least BufferIO 0.2.7, the first version with `take_inner`.
+
+# 0.2.1
+* Bump BufferIO to also support v0.3
+
 # 0.2.0
 ## Breaking changes
 * `seek` now only takes a `VirtualOffset`. The `Int` method (an offset in the

@@ -89,15 +89,58 @@ function throw_error(io::SyncBGZFReader, err::BGZFError)
     throw(err)
 end
 
-function Base.close(io::SyncBGZFReader)
-    io.state == STATE_CLOSED && return nothing
+# Mark the reader as closed, without touching the underlying IO
+function release_resources!(io::SyncBGZFReader)
     io.start = 1
     io.stop = 0
     empty!(io.gzip_extra_fields)
     io.decompressor = nothing
-    close(io.io)
     io.state = STATE_CLOSED
     return nothing
+end
+
+function Base.close(io::SyncBGZFReader)
+    io.state == STATE_CLOSED && return nothing
+    release_resources!(io)
+    close(io.io)
+    return nothing
+end
+
+"""
+    take_inner(io::Union{SyncBGZFReader{T}, BGZFReader{T}})::T
+
+Close `io` and return its wrapped `T`, without closing the wrapped `T`.
+
+The position of the returned IO is different for the two readers:
+* A `SyncBGZFReader` reads one block at a time, so the IO is positioned just after the
+  block most recently loaded by `io`, or where it was when `io` was created, if no block
+  was loaded. This means that any decompressed and not consumed data discarded by this
+  function can be obtained by `get_buffer(io)` before calling `take_inner`.
+* A `BGZFReader` reads ahead of the data returned to the user, by an unspecified
+  number of blocks. The position of the IO is therefore unspecified.
+
+Throw an `IOError` of kind `ClosedIO` if `io` is already closed.
+
+# Examples
+```jldoctest
+julia> cursor = CursorReader(bgzf_data);
+
+julia> reader = SyncBGZFReader(cursor);
+
+julia> String(read(reader, 5))
+"Hello"
+
+julia> take_inner(reader) === cursor
+true
+
+julia> isopen(reader)
+false
+```
+"""
+function BufferIO.take_inner(io::SyncBGZFReader)
+    io.state == STATE_CLOSED && throw(IOError(IOErrorKinds.ClosedIO))
+    release_resources!(io)
+    return io.io
 end
 
 """

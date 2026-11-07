@@ -64,29 +64,6 @@ BufferIO.get_buffer(io::TinyWriter) = MemoryView(io.buffer)
 BufferIO.grow_buffer(io::TinyWriter) = 0
 Base.isopen(::TinyWriter) = true
 
-# Writer that can hold at most `limit` bytes, after which writing throws
-mutable struct LimitedWriter <: BufferIO.AbstractBufWriter
-    inner::VecWriter
-    limit::Int
-    closed::Bool
-end
-
-LimitedWriter(limit::Int) = LimitedWriter(VecWriter(), limit, false)
-
-function BufferIO.get_buffer(io::LimitedWriter)
-    buffer = get_buffer(io.inner)
-    return buffer[1:min(length(buffer), io.limit - length(io.inner.vec))]
-end
-
-function BufferIO.grow_buffer(io::LimitedWriter)
-    length(io.inner.vec) ≥ io.limit && return 0
-    return BufferIO.grow_buffer(io.inner)
-end
-
-BufferIO.consume(io::LimitedWriter, n::Int) = consume(io.inner, n)
-Base.close(io::LimitedWriter) = (io.closed = true; nothing)
-Base.isopen(io::LimitedWriter) = !io.closed
-
 @testset "Failing underlying write sets error state" begin
     underlying = LimitedWriter(100_000)
     writer = BGZFWriter(underlying; n_workers = 2)
@@ -316,4 +293,110 @@ end
         @test read(reader) == expected_data
         close(reader)
     end
+end
+
+@testset "take_inner" begin
+    io = VecWriter()
+    writer = BGZFWriter(io; n_workers = 2)
+    write(writer, "Hello")
+    @test take_inner(writer) === io
+    @test !isopen(writer)
+    @test isopen(io)
+    @test_throws IOError write(writer, 0x01)
+
+    # Includes the EOF block, so the output is not truncated
+    @test SyncBGZFReader(r -> read(r, String), CursorReader(io.vec)) == "Hello"
+
+    n_bytes = length(io.vec)
+    close(writer)
+    @test isopen(io)
+    @test length(io.vec) == n_bytes
+
+    @test_throws IOError take_inner(writer)
+end
+
+@testset "take_inner writes data larger than one buffer" begin
+    io = VecWriter()
+    writer = BGZFWriter(io; n_workers = 2)
+    data = rand(UInt8, 1_000_000)
+    write(writer, data)
+    take_inner(writer)
+    @test SyncBGZFReader(read, CursorReader(io.vec)) == data
+end
+
+@testset "take_inner respects append_empty" begin
+    io = VecWriter()
+    writer = BGZFWriter(io; n_workers = 2, append_empty = false)
+    write(writer, "Hello")
+    take_inner(writer)
+    @test SyncBGZFReader(r -> read(r, String), CursorReader(io.vec); check_truncated = false) == "Hello"
+    @test_throws BGZFError SyncBGZFReader(read, CursorReader(io.vec))
+end
+
+@testset "take_inner does not flush the inner IO" begin
+    underlying = FailingFlushWriter()
+    writer = BGZFWriter(underlying; n_workers = 2)
+    @test take_inner(writer) === underlying
+    @test !underlying.closed
+end
+
+@testset "take_inner preserves an IOBuffer" begin
+    buffer = IOBuffer()
+    writer = BGZFWriter(buffer; n_workers = 2)
+    write(writer, "Hello")
+    inner = take_inner(writer)
+    @test inner isa BufWriter{IOBuffer}
+    @test take_inner(inner) === buffer
+    @test SyncBGZFReader(r -> read(r, String), CursorReader(take!(buffer))) == "Hello"
+end
+
+@testset "take_inner in error state throws and leaves writer closable" begin
+    underlying = LimitedWriter(100_000)
+    writer = BGZFWriter(underlying; n_workers = 2)
+    write(writer, rand(UInt8, 300_000))
+    # The first call fails in writing, the second call sees the error state
+    @test_throws IOError take_inner(writer)
+    @test_throws BGZFError take_inner(writer)
+    @test isopen(writer)
+    @test !underlying.closed
+    close(writer)
+    @test !isopen(writer)
+    @test underlying.closed
+end
+
+@testset "take_inner with force in error state" begin
+    underlying = LimitedWriter(100_000)
+    writer = BGZFWriter(underlying; n_workers = 2)
+    write(writer, rand(UInt8, 300_000))
+    @test_throws IOError shallow_flush(writer)
+
+    n_bytes = length(underlying.inner.vec)
+    @test take_inner(writer; force = true) === underlying
+    @test !isopen(writer)
+    @test !underlying.closed
+    @test length(underlying.inner.vec) == n_bytes
+
+    # All workers stop, even though blocks may have been in flight
+    foreach(wait, writer.workers)
+
+    close(writer)
+    @test !underlying.closed
+    @test_throws IOError take_inner(writer; force = true)
+end
+
+@testset "take_inner with force discards data" begin
+    io = VecWriter()
+    writer = BGZFWriter(io; n_workers = 2)
+    write(writer, "Hello")
+    @test take_inner(writer; force = true) === io
+    @test isempty(io.vec)
+    foreach(wait, writer.workers)
+end
+
+@testset "take_inner with force returns the BufWriter" begin
+    writer = BGZFWriter(IOBuffer(); n_workers = 2)
+    inner = take_inner(writer; force = true)
+    @test inner isa BufWriter{IOBuffer}
+    @test isopen(inner)
+    close(inner)
 end

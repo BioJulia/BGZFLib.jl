@@ -322,3 +322,39 @@ end
     show(buf, reader)
     @test !isempty(take!(buf))
 end
+
+@testset "take_inner" begin
+    # The inner IO is left just after the block loaded by the reader
+    cursor = CursorReader(gz1_data)
+    reader = SyncBGZFReader(cursor)
+    @test read(reader, 5) == gz1_content[1][1:5]
+    block_end = position(cursor)
+    @test take_inner(reader) === cursor
+    @test !isopen(reader)
+    @test isopen(cursor)
+    @test position(cursor) == block_end
+    @test isempty(get_buffer(reader))
+    @test_throws IOError seekstart(reader)
+
+    # The inner IO is not closed by closing the reader afterwards
+    close(reader)
+    @test isopen(cursor)
+
+    @test_throws IOError take_inner(reader)
+end
+
+@testset "take_inner from IO returns the BufReader" begin
+    reader = SyncBGZFReader(IOBuffer(gz1_data))
+    inner = take_inner(reader)
+    @test inner isa BufReader{IOBuffer}
+    @test isopen(inner)
+    close(inner)
+end
+
+@testset "take_inner in error state" begin
+    cursor = CursorReader(append!(copy(gz1_data), b"bad data"))
+    reader = SyncBGZFReader(cursor)
+    @test_throws BGZFError read(reader)
+    @test take_inner(reader) === cursor
+    @test !isopen(reader)
+end
